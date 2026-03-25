@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Indoor Navigation</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+  <!-- 🔥 IMPORTANT (scanner library) -->
+  <script src="https://unpkg.com/html5-qrcode"></script>
+
+  <style>
+    body { margin: 0; }
+
+    #map {
+      height: 70vh;
+      width: 100%;
+    }
+
+    #reader {
+      width: 300px;
+      margin: auto;
+    }
+  </style>
+</head>
+
+<body>
+
+<h3>Indoor Navigation</h3>
+
+<div id="map"></div>
+
+<!-- 🔥 SCANNER WILL SHOW HERE -->
+<div id="reader"></div>
+
+<!-- 🔥 ALWAYS KEEP THIS LAST -->
+<script src="app.js"></script>
+
+</body>
+</html>
