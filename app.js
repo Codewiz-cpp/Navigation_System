@@ -1,274 +1,247 @@
-// ---------------- MAP SETUP ----------------
-alert("JS IS RUNNING");
-console.log("APP RUNNING");
-var map = L.map('map', {
-  crs: L.CRS.Simple,
-  minZoom: -2
-});
+// ---------------- THREE JS SCENE ----------------
 
-map.dragging.disable();
+let scene = new THREE.Scene();
 
-// click to get coordinates on the map
-  map.on('click', function(e) {
-  console.log("X:", e.latlng.lng, "Y:", e.latlng.lat);
-});
+let camera = new THREE.PerspectiveCamera(
+75,
+window.innerWidth / (window.innerHeight*0.8),
+0.1,
+1000
+);
 
-var bounds = [[0,0],[1400,900]];
+let renderer = new THREE.WebGLRenderer({antialias:true});
 
-L.imageOverlay('./floorplan.png', bounds).addTo(map);
+renderer.setSize(window.innerWidth,window.innerHeight*0.8);
 
-// FORCE FULL IMAGE
-map.fitBounds(bounds);
+document.getElementById("viewer").appendChild(renderer.domElement);
 
-const origin = { x: 661, y: 1266.88 };
 
-function relative(x, y) {
-  return {
-    x: x - origin.x,
-    y: y - origin.y
-  };
+// lights
+const light = new THREE.HemisphereLight(0xffffff,0x444444,1.5);
+scene.add(light);
+
+
+// camera
+camera.position.set(0,6,12);
+
+
+// controls
+const controls = new THREE.OrbitControls(camera,renderer.domElement);
+
+
+// ---------------- LOAD BUILDING ----------------
+
+const loader = new THREE.GLTFLoader();
+
+let building;
+
+loader.load(
+
+"./model.glb",
+
+function(gltf){
+
+building = gltf.scene;
+
+scene.add(building);
+
+},
+
+undefined,
+
+function(err){
+console.error(err);
 }
 
-// ---------------- NODES ----------------
-const nodes = {
-  entrance: relative(661, 1266.88),
+);
 
-  corridor_top: relative(374, 1201.5416717529297),
-  corridor_mid: relative(370, 927.5416717529297),
-  corridor_bottom: relative(370, 605.5416717529297),
-
-  hall: relative(184, 1075.5416717529297),
-  kitchen: relative(528, 939.5416717529297),
-
-  room_entry: relative(368, 489.5416717529297),
-  room_center: relative(364, 315.5416717529297)
-};
-
-let currentPos = { x: 0, y: 0 };
-
-// ---------------- GRAPH ----------------
-const graph = {
-  entrance: ["corridor_top"],
-  corridor_top: ["entrance", "corridor_mid"],
-  corridor_mid: ["corridor_top", "corridor_bottom", "hall", "kitchen"],
-  corridor_bottom: ["corridor_mid", "room_entry"],
-  room_entry: ["corridor_bottom", "room_center"],
-  room_center: ["room_entry"],
-  hall: ["corridor_mid"],
-  kitchen: ["corridor_mid"]
-};
 
 // ---------------- USER MARKER ----------------
-var userMarker = L.marker([0,0]).addTo(map);
 
-// ---------------- SET POSITION ----------------
-function setPosition(x, y) {
-  userMarker.setLatLng([origin.y + y, origin.x + x]);
+const markerGeo = new THREE.SphereGeometry(0.2,32,32);
+
+const markerMat = new THREE.MeshBasicMaterial({color:0xff0000});
+
+const userMarker = new THREE.Mesh(markerGeo,markerMat);
+
+scene.add(userMarker);
+
+
+// ---------------- NAVIGATION NODES ----------------
+
+const nodes = {
+
+entrance:{x:0,y:0,z:0},
+
+corridor:{x:-3,y:0,z:-4},
+
+hall:{x:-5,y:0,z:-3},
+
+kitchen:{x:-2,y:0,z:-6},
+
+room:{x:-4,y:0,z:-10}
+
+};
+
+
+// ---------------- GRAPH ----------------
+
+const graph = {
+
+entrance:["corridor"],
+
+corridor:["entrance","hall","kitchen"],
+
+hall:["corridor"],
+
+kitchen:["corridor","room"],
+
+room:["kitchen"]
+
+};
+
+
+// ---------------- PATHFINDING ----------------
+
+function heuristic(a,b){
+
+return Math.hypot(
+nodes[a].x-nodes[b].x,
+nodes[a].z-nodes[b].z
+);
+
 }
 
-// ---------------- DRAW PATH ----------------
-let currentPath;
+function getPath(start,end){
 
-function drawPath(path) {
-  if (currentPath) map.removeLayer(currentPath);
+let open=[start];
 
-  let coords = path.map(p => {
-    let n = nodes[p];
-    return [origin.y + n.y, origin.x + n.x];
-  });
+let came={};
 
-  currentPath = L.polyline(coords, {color: 'blue'}).addTo(map);
-    let navPath = [];
-    let navIndex = 0;
+let g={};
 
-}
-// follow path
-function followPath() {
-  if (navIndex >= navPath.length) return;
+let f={};
 
-  let nextNode = nodes[navPath[navIndex]];
+Object.keys(nodes).forEach(n=>{
 
-  smoothMove(nextNode.x, nextNode.y);
+g[n]=Infinity;
+f[n]=Infinity;
 
-  navIndex++;
-
-  setTimeout(followPath, 800);
-}
-
-// A* path
-function heuristic(a, b) {
-  return Math.hypot(nodes[a].x - nodes[b].x, nodes[a].y - nodes[b].y);
-}
-
-function getPath(start, end) {
-  let openSet = [start];
-  let cameFrom = {};
-
-  let gScore = {};
-  let fScore = {};
-
-  Object.keys(nodes).forEach(n => {
-    gScore[n] = Infinity;
-    fScore[n] = Infinity;
-  });
-
-  gScore[start] = 0;
-  fScore[start] = heuristic(start, end);
-
-  while (openSet.length > 0) {
-    let current = openSet.reduce((a, b) => 
-      fScore[a] < fScore[b] ? a : b
-    );
-
-    if (current === end) {
-      let path = [];
-      while (current) {
-        path.unshift(current);
-        current = cameFrom[current];
-      }
-      return path;
-    }
-
-    openSet = openSet.filter(n => n !== current);
-
-    for (let neighbor of graph[current]) {
-      let tempG = gScore[current] + heuristic(current, neighbor);
-
-      if (tempG < gScore[neighbor]) {
-        cameFrom[neighbor] = current;
-        gScore[neighbor] = tempG;
-        fScore[neighbor] = tempG + heuristic(neighbor, end);
-
-        if (!openSet.includes(neighbor)) {
-          openSet.push(neighbor);
-        }
-      }
-    }
-  }
-
-  return [];
-}
-//smooth movement
-
-function smoothMove(targetX, targetY) {
-  let startX = currentPos.x;
-  let startY = currentPos.y;
-
-  let steps = 20;
-  let i = 0;
-
-  let interval = setInterval(() => {
-    let t = i / steps;
-
-    let x = startX + (targetX - startX) * t;
-    let y = startY + (targetY - startY) * t;
-
-    setPosition(x, y);
-
-    i++;
-    if (i > steps) {
-      currentPos.x = targetX;
-      currentPos.y = targetY;
-      clearInterval(interval);
-    }
-  }, 20);
-}
-
-// ---------------- QR SCAN ----------------
-// function onScanSuccess(decodedText) {
-//   let data = JSON.parse(decodedText);
-
-//   currentPos.x = data.x;
-//   currentPos.y = data.y;
-
-//   setPosition(currentPos.x, currentPos.y);
-
-//   let path = getPath(data.name, "room_center");
-//   drawPath(path);
-
-//   scanner.clear(); // stop camera after scan
-// }
-
-// const scanner = new Html5QrcodeScanner("reader", {
-//   fps: 10,
-//   qrbox: 250
-// });
-
-// scanner.render(onScanSuccess);
-
-//   currentPos = { x: 0, y: 0 };
-//   setPosition(currentPos.x, currentPos.y);
-//   currentPos = { x: 0, y: 0 };
-// setPosition(currentPos.x, currentPos.y);
-
-//movement function
-  function enableMotion() {
-  if (typeof DeviceMotionEvent.requestPermission === "function") {
-    DeviceMotionEvent.requestPermission().then(res => {
-      if (res === "granted") startTracking();
-    });
-  } else {
-    startTracking();
-  }
-}
-//tracking
-// function startTracking() {
-//   window.addEventListener("devicemotion", function(event) {
-//     let acc = event.acceleration;
-
-//     if (!acc) return;
-
-//     currentPos.x += acc.x * 2;
-//     currentPos.y += acc.y * 2;
-
-//     setPosition(currentPos.x, currentPos.y);
-
-//     // 🔥 ADD HERE
-//     updateNavigation();
-//   });
-// }
-// auto path update
-// function updateNavigation() {
-//   let nearest = getNearestNode(currentPos);
-
-//   let path = getPath(nearest, "room_center");
-//   drawPath(path);
-// }
-// helper function
-function getNearestNode(pos) {
-  let minDist = Infinity;
-  let closest = null;
-
-  for (let key in nodes) {
-    let n = nodes[key];
-    let dist = Math.hypot(n.x - pos.x, n.y - pos.y);
-
-    if (dist < minDist) {
-      minDist = dist;
-      closest = key;
-    }
-  }
-
-  return closest;
-}
-// ---------------- QR SCANNER ----------------
-
-function onScanSuccess(decodedText) {
-  console.log("QR DATA:", decodedText);
-
-  let data = JSON.parse(decodedText);
-
-  currentPos.x = data.x;
-  currentPos.y = data.y;
-
-  setPosition(currentPos.x, currentPos.y);
-
-  drawPath(getPath(data.name, "room_center"));
-}
-
-const scanner = new Html5QrcodeScanner("reader", {
-  fps: 10,
-  qrbox: 250
 });
 
+g[start]=0;
+f[start]=heuristic(start,end);
+
+while(open.length>0){
+
+let current=open.reduce((a,b)=>f[a]<f[b]?a:b);
+
+if(current===end){
+
+let path=[];
+
+while(current){
+
+path.unshift(current);
+
+current=came[current];
+
+}
+
+return path;
+
+}
+
+open=open.filter(n=>n!==current);
+
+for(let n of graph[current]){
+
+let temp=g[current]+heuristic(current,n);
+
+if(temp<g[n]){
+
+came[n]=current;
+
+g[n]=temp;
+
+f[n]=temp+heuristic(n,end);
+
+if(!open.includes(n)) open.push(n);
+
+}
+
+}
+
+}
+
+return [];
+
+}
+
+
+// ---------------- DRAW 3D PATH ----------------
+
+function drawPath(path){
+
+let pts=[];
+
+path.forEach(p=>{
+
+let n=nodes[p];
+
+pts.push(new THREE.Vector3(n.x,n.y,n.z));
+
+});
+
+let geo=new THREE.BufferGeometry().setFromPoints(pts);
+
+let mat=new THREE.LineBasicMaterial({color:0x00ffff});
+
+let line=new THREE.Line(geo,mat);
+
+scene.add(line);
+
+}
+
+
+// ---------------- SET USER POSITION ----------------
+
+function setPosition(x,y,z){
+
+userMarker.position.set(x,y,z);
+
+}
+
+
+// ---------------- QR SCANNER ----------------
+
+function onScanSuccess(decodedText){
+
+let data=JSON.parse(decodedText);
+
+setPosition(data.x,data.y,data.z);
+
+let path=getPath(data.name,"room");
+
+drawPath(path);
+
+}
+
+const scanner=new Html5QrcodeScanner("reader",{fps:10,qrbox:250});
+
 scanner.render(onScanSuccess);
+
+
+// ---------------- RENDER LOOP ----------------
+
+function animate(){
+
+requestAnimationFrame(animate);
+
+controls.update();
+
+renderer.render(scene,camera);
+
+}
+
+animate();

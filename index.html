@@ -1,40 +1,44 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Indoor Navigation</title>
+<title>Indoor Navigation 3D</title>
 
-  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/loaders/GLTFLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/controls/OrbitControls.js"></script>
 
-  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script src="https://unpkg.com/html5-qrcode"></script>
 
-  <!-- 🔥 IMPORTANT (scanner library) -->
-  <script src="https://unpkg.com/html5-qrcode"></script>
+<style>
 
-  <style>
-    body { margin: 0; }
+body{
+margin:0;
+overflow:hidden;
+font-family:Arial;
+}
 
-    #map {
-      height: 70vh;
-      width: 100%;
-    }
+#viewer{
+width:100%;
+height:80vh;
+background:black;
+}
 
-    #reader {
-      width: 300px;
-      margin: auto;
-    }
-  </style>
+#reader{
+width:300px;
+margin:auto;
+}
+
+</style>
 </head>
 
 <body>
 
-<h3>Indoor Navigation</h3>
+<h3 style="text-align:center">Indoor Navigation (3D)</h3>
 
-<div id="map"></div>
+<div id="viewer"></div>
 
-<!-- 🔥 SCANNER WILL SHOW HERE -->
 <div id="reader"></div>
 
-<!-- 🔥 ALWAYS KEEP THIS LAST -->
 <script src="app.js"></script>
 
 </body>
