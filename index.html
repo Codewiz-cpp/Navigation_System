@@ -1,45 +1,35 @@
 <!DOCTYPE html>
 <html>
 <head>
-<title>Indoor Navigation 3D</title>
-
-<script src="https://cdn.jsdelivr.net/npm/three@0.150.1/build/three.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.150.1/examples/js/controls/OrbitControls.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.150.1/examples/js/loaders/GLTFLoader.js"></script>
-
-<script src="https://unpkg.com/html5-qrcode"></script>
-
-<style>
-
-body{
-margin:0;
-overflow:hidden;
-font-family:Arial;
-}
-
-#viewer{
-width:100%;
-height:80vh;
-background:rgb(0, 0, 0);
-}
-
-#reader{
-width:300px;
-margin:auto;
-}
-
-</style>
+  <title>Indoor Navigation 3D</title>
+  <style>
+    body { margin: 0; }
+    canvas { display: block; }
+    #info {
+      position: fixed;
+      top: 10px;
+      left: 10px;
+      color: white;
+      background: rgba(0,0,0,0.6);
+      padding: 10px;
+      font-family: monospace;
+      font-size: 13px;
+      border-radius: 6px;
+    }
+  </style>
 </head>
-
 <body>
+  <div id="info">Loading...</div>
 
-<h3 style="text-align:center">Indoor Navigation (3D)</h3>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
 
-<div id="viewer"></div>
-
-<div id="reader"></div>
-
-<script type="module" src="app.js"></script>
-
+  <script type="module" src="app.js"></script>
 </body>
 </html>
