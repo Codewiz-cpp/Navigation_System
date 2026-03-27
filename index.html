@@ -3,9 +3,9 @@
 <head>
 <title>Indoor Navigation 3D</title>
 
-<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/loaders/GLTFLoader.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.150.1/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.150.1/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.150.1/examples/js/loaders/GLTFLoader.js"></script>
 
 <script src="https://unpkg.com/html5-qrcode"></script>
 
@@ -20,7 +20,7 @@ font-family:Arial;
 #viewer{
 width:100%;
 height:80vh;
-background:black;
+background:rgb(0, 0, 0);
 }
 
 #reader{
@@ -39,7 +39,7 @@ margin:auto;
 
 <div id="reader"></div>
 
-<script src="app.js"></script>
+<script type="module" src="app.js"></script>
 
 </body>
 </html>

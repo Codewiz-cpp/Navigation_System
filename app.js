@@ -1,3 +1,13 @@
+import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js";
+
+import { OrbitControls } from "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/controls/OrbitControls.js?module";
+
+import { GLTFLoader } from "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/loaders/GLTFLoader.js?module";
+
+console.log("THREE:", THREE);
+console.log("OrbitControls:", OrbitControls);
+console.log("GLTFLoader:", GLTFLoader);
+
 // ---------------- THREE JS SCENE ----------------
 
 let scene = new THREE.Scene();
@@ -22,11 +32,11 @@ scene.add(light);
 
 
 // camera
-camera.position.set(0,6,12);
-
+camera.position.set(10,10,10);
+camera.lookAt(0,0,0);
 
 // controls
-const controls = new THREE.OrbitControls(camera,renderer.domElement);
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
 
 
 // ---------------- LOAD BUILDING ----------------
@@ -35,22 +45,22 @@ const loader = new THREE.GLTFLoader();
 
 let building;
 
-loader.load(
-
-"./model.glb",
-
-function(gltf){
-
-building = gltf.scene;
-
-scene.add(building);
+loader.load("./model.glb", function(gltf){
+  console.log("MODEL LOADED");
+  scene.add(gltf.scene);
 
 },
 
-undefined,
+function(xhr){
 
-function(err){
-console.error(err);
+console.log((xhr.loaded / xhr.total * 100) + "% loaded");
+
+},
+
+function(error){
+
+console.error("MODEL LOAD ERROR:",error);
+
 }
 
 );
