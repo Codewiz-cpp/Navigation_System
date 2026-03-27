@@ -50,13 +50,41 @@ scene.add(dirLight);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.dampingFactor = 0.05;
-controls.zoomSpeed = 2;       // we handle zoom manually
+controls.minDistance = 0;
+controls.maxDistance = Infinity;
+controls.zoomSpeed = 0;        // ← disable built-in zoom, we handle it manually
 
 controls.mouseButtons = {
   LEFT: THREE.MOUSE.ROTATE,
   MIDDLE: THREE.MOUSE.PAN,
-  RIGHT: THREE.MOUSE.PAN,
+  RIGHT: THREE.MOUSE.PAN
 };
+
+// ---------------- INFINITE ZOOM ----------------
+renderer.domElement.addEventListener("wheel", (e) => {
+  e.preventDefault();
+
+  const zoomIn = e.deltaY < 0;
+  const distance = camera.position.distanceTo(controls.target);
+  const speed = distance * 0.1;
+
+  const dir = new THREE.Vector3();
+  dir.subVectors(controls.target, camera.position).normalize();
+
+  if (zoomIn) {
+    // Move both camera AND target forward — shrinks sphere radius
+    // but keeps orbit center in front of you
+    camera.position.addScaledVector(dir, speed);
+    controls.target.addScaledVector(dir, speed * 0.5);
+  } else {
+    // Pull back
+    camera.position.addScaledVector(dir, -speed);
+    controls.target.addScaledVector(dir, -speed * 0.5);
+  }
+
+  controls.update();
+
+}, { passive: false });
 
 // ---------------- LOAD MODEL ----------------
 const loader = new GLTFLoader();
