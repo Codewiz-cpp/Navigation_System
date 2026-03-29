@@ -1,737 +1,160 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>FloorNav · Indoor Positioning</title>
-
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,400&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet" />
-
-  <style>
-    /* ── Reset & Base ───────────────────────────────────────── */
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-    :root {
-      --bg:          #080c10;
-      --surface:     #0e1318;
-      --surface-2:   #141b22;
-      --border:      rgba(255,255,255,0.07);
-      --border-hi:   rgba(255,255,255,0.14);
-      --text-1:      #e8edf2;
-      --text-2:      #7a8fa8;
-      --text-3:      #3d5068;
-      --accent:      #00c8ff;
-      --accent-dim:  rgba(0,200,255,0.12);
-      --accent-glow: rgba(0,200,255,0.25);
-      --green:       #00e5a0;
-      --amber:       #f5a623;
-      --red:         #ff4d6a;
-      --font-ui:     'Syne', sans-serif;
-      --font-mono:   'DM Mono', monospace;
-      --radius:      10px;
-      --radius-sm:   6px;
-    }
-
-    html, body {
-      width: 100%; height: 100%;
-      overflow: hidden;
-      background: var(--bg);
-      font-family: var(--font-ui);
-      color: var(--text-1);
-      -webkit-font-smoothing: antialiased;
-    }
-
-    /* Canvas fills everything */
-    canvas { display: block; position: fixed; inset: 0; z-index: 0; }
-
-    /* ── Shared panel chrome ────────────────────────────────── */
-    .panel {
-      background: rgba(8, 12, 16, 0.88);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      backdrop-filter: blur(18px) saturate(140%);
-      -webkit-backdrop-filter: blur(18px) saturate(140%);
-    }
-
-    /* ── Top-left wordmark ──────────────────────────────────── */
-    #wordmark {
-      position: fixed;
-      top: 18px; left: 18px;
-      z-index: 60;
-      display: flex; align-items: center; gap: 10px;
-      pointer-events: none;
-    }
-    #wordmark .icon {
-      width: 32px; height: 32px;
-      border-radius: 8px;
-      background: linear-gradient(135deg, var(--accent) 0%, #005fff 100%);
-      display: flex; align-items: center; justify-content: center;
-      font-size: 15px;
-      box-shadow: 0 0 18px var(--accent-glow);
-    }
-    #wordmark .name {
-      font-family: var(--font-ui);
-      font-weight: 800;
-      font-size: 15px;
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
-      color: var(--text-1);
-    }
-    #wordmark .name span {
-      color: var(--accent);
-    }
-
-    /* ── View-mode toggle button (top-left below wordmark) ──── */
-    #viewBtn {
-      position: fixed;
-      top: 64px; left: 18px;
-      z-index: 60;
-      display: flex; align-items: center; gap: 7px;
-      padding: 7px 14px;
-      background: rgba(8,12,16,0.80);
-      border: 1px solid var(--border-hi);
-      border-radius: 20px;
-      color: var(--text-2);
-      font-family: var(--font-ui);
-      font-size: 11px;
-      font-weight: 600;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      cursor: pointer;
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
-      transition: color 0.2s, border-color 0.2s, box-shadow 0.2s;
-    }
-    #viewBtn:hover {
-      color: var(--accent);
-      border-color: var(--accent);
-      box-shadow: 0 0 12px var(--accent-dim);
-    }
-    #viewBtn .dot {
-      width: 6px; height: 6px;
-      border-radius: 50%;
-      background: var(--accent);
-      box-shadow: 0 0 6px var(--accent);
-      animation: blink 2s ease-in-out infinite;
-    }
-    @keyframes blink {
-      0%, 100% { opacity: 1; }
-      50%       { opacity: 0.3; }
-    }
-
-    /* ── Status / Positioning panel (top-right) ─────────────── */
-    #statusPanel {
-      position: fixed;
-      top: 18px; right: 18px;
-      z-index: 60;
-      width: 220px;
-      padding: 0;
-      pointer-events: none;
-    }
-    #statusPanel .panel-header {
-      display: flex; align-items: center; gap: 8px;
-      padding: 11px 14px 10px;
-      border-bottom: 1px solid var(--border);
-    }
-    #statusPanel .panel-header .pill {
-      display: flex; align-items: center; gap: 5px;
-      background: var(--accent-dim);
-      border: 1px solid rgba(0,200,255,0.2);
-      border-radius: 20px;
-      padding: 2px 8px 2px 6px;
-      font-size: 10px;
-      font-weight: 600;
-      letter-spacing: 0.08em;
-      color: var(--accent);
-      text-transform: uppercase;
-    }
-    #statusPanel .panel-header .pill .led {
-      width: 5px; height: 5px;
-      border-radius: 50%;
-      background: var(--accent);
-      box-shadow: 0 0 5px var(--accent);
-      animation: blink 1.6s ease-in-out infinite;
-    }
-    #statusPanel .panel-title {
-      font-size: 10px;
-      font-weight: 600;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      color: var(--text-3);
-      flex: 1;
-      text-align: right;
-    }
-
-    /* coordinate row */
-    #statusPanel .coords {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 1px;
-      border-bottom: 1px solid var(--border);
-    }
-    #statusPanel .coord-cell {
-      padding: 10px 14px;
-      background: var(--surface);
-    }
-    #statusPanel .coord-cell:first-child {
-      border-right: 1px solid var(--border);
-    }
-    #statusPanel .coord-label {
-      font-family: var(--font-mono);
-      font-size: 9px;
-      color: var(--text-3);
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      margin-bottom: 3px;
-    }
-    #statusPanel .coord-val {
-      font-family: var(--font-mono);
-      font-size: 16px;
-      font-weight: 500;
-      color: var(--text-1);
-      letter-spacing: -0.01em;
-    }
-    #statusPanel .coord-unit {
-      font-size: 9px;
-      color: var(--text-3);
-      margin-left: 2px;
-    }
-
-    /* accuracy bar */
-    #statusPanel .acc-row {
-      padding: 9px 14px;
-      border-bottom: 1px solid var(--border);
-    }
-    #statusPanel .acc-label {
-      display: flex; justify-content: space-between; align-items: center;
-      font-family: var(--font-mono);
-      font-size: 9px;
-      color: var(--text-3);
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      margin-bottom: 5px;
-    }
-    #statusPanel .acc-val {
-      color: var(--amber);
-      font-weight: 500;
-    }
-    #statusPanel .acc-track {
-      height: 3px;
-      background: var(--surface-2);
-      border-radius: 2px;
-      overflow: hidden;
-    }
-    #statusPanel .acc-fill {
-      height: 100%;
-      background: linear-gradient(90deg, var(--green), var(--amber), var(--red));
-      border-radius: 2px;
-      transition: width 0.4s ease;
-    }
-
-    /* router signal rows */
-    #statusPanel .routers {
-      padding: 8px 0 4px;
-      border-bottom: 1px solid var(--border);
-    }
-    #statusPanel .router-row {
-      display: flex; align-items: center; gap: 8px;
-      padding: 5px 14px;
-    }
-    #statusPanel .router-dot {
-      width: 7px; height: 7px;
-      border-radius: 50%;
-      flex-shrink: 0;
-    }
-    #statusPanel .router-name {
-      font-family: var(--font-mono);
-      font-size: 10px;
-      color: var(--text-2);
-      flex: 1;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    #statusPanel .router-rssi {
-      font-family: var(--font-mono);
-      font-size: 10px;
-      font-weight: 500;
-    }
-    #statusPanel .router-bar {
-      width: 30px; height: 3px;
-      background: var(--surface-2);
-      border-radius: 2px;
-      overflow: hidden;
-    }
-    #statusPanel .router-fill {
-      height: 100%;
-      border-radius: 2px;
-      transition: width 0.4s ease;
-    }
-
-    /* footer meta */
-    #statusPanel .meta {
-      display: flex; justify-content: space-between;
-      padding: 8px 14px 10px;
-      font-family: var(--font-mono);
-      font-size: 9px;
-      color: var(--text-3);
-      letter-spacing: 0.06em;
-    }
-    #statusPanel .meta .step-count { color: var(--text-2); }
-
-    /* ── Minimap ─────────────────────────────────────────────── */
-    #minimap {
-      position: fixed;
-      bottom: 20px; right: 18px;
-      z-index: 60;
-      border-radius: var(--radius);
-      border: 1px solid var(--border);
-      overflow: hidden;
-      cursor: crosshair;
-      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
-    }
-    #minimap canvas {
-      position: relative !important;
-      display: block;
-    }
-    #minimapLabel {
-      position: absolute;
-      bottom: 0; left: 0; right: 0;
-      padding: 5px 10px;
-      background: linear-gradient(transparent, rgba(8,12,16,0.9));
-      display: flex; justify-content: space-between;
-      font-family: var(--font-mono);
-      font-size: 8px;
-      letter-spacing: 0.12em;
-      color: var(--text-3);
-      text-transform: uppercase;
-      pointer-events: none;
-    }
-    #minimapLabel .src { color: var(--accent); }
-
-    /* ── Legend bar (bottom-center) ─────────────────────────── */
-    #legend {
-      position: fixed;
-      bottom: 20px;
-      left: 50%; transform: translateX(-50%);
-      z-index: 60;
-      display: flex; align-items: center; gap: 0;
-      background: rgba(8,12,16,0.82);
-      border: 1px solid var(--border);
-      border-radius: 20px;
-      overflow: hidden;
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
-      pointer-events: none;
-    }
-    .legend-key {
-      display: flex; align-items: center; gap: 7px;
-      padding: 7px 16px;
-      border-right: 1px solid var(--border);
-    }
-    .legend-key:last-child { border-right: none; }
-    .legend-key .kbd {
-      display: inline-flex; align-items: center; justify-content: center;
-      min-width: 22px; height: 18px;
-      padding: 0 5px;
-      background: var(--surface-2);
-      border: 1px solid var(--border-hi);
-      border-radius: 4px;
-      font-family: var(--font-mono);
-      font-size: 9px;
-      font-weight: 500;
-      color: var(--text-2);
-      letter-spacing: 0;
-    }
-    .legend-key .lbl {
-      font-family: var(--font-mono);
-      font-size: 9px;
-      color: var(--text-3);
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
-    }
-
-    /* ── Click-to-enter overlay ─────────────────────────────── */
-    #hintOverlay {
-      position: fixed; inset: 0;
-      z-index: 80;
-      display: flex; align-items: center; justify-content: center;
-      background: rgba(8,12,16,0.72);
-      backdrop-filter: blur(6px);
-      -webkit-backdrop-filter: blur(6px);
-    }
-    #hintCard {
-      background: rgba(14,19,24,0.96);
-      border: 1px solid var(--border-hi);
-      border-radius: 16px;
-      padding: 36px 44px;
-      max-width: 380px;
-      text-align: center;
-      box-shadow: 0 24px 80px rgba(0,0,0,0.7), 0 0 0 1px rgba(0,200,255,0.06);
-      animation: fadeUp 0.35s ease;
-    }
-    @keyframes fadeUp {
-      from { opacity: 0; transform: translateY(16px); }
-      to   { opacity: 1; transform: translateY(0); }
-    }
-    #hintCard .hint-icon {
-      font-size: 40px; margin-bottom: 16px;
-      display: block;
-    }
-    #hintCard h1 {
-      font-family: var(--font-ui);
-      font-weight: 800;
-      font-size: 22px;
-      letter-spacing: -0.01em;
-      margin-bottom: 6px;
-      color: var(--text-1);
-    }
-    #hintCard p {
-      font-family: var(--font-mono);
-      font-size: 11px;
-      color: var(--text-3);
-      margin-bottom: 24px;
-      letter-spacing: 0.04em;
-    }
-    #hintCard .keybinds {
-      display: grid;
-      grid-template-columns: auto 1fr;
-      gap: 8px 16px;
-      text-align: left;
-      margin-bottom: 20px;
-    }
-    #hintCard .keybinds .k {
-      font-family: var(--font-mono);
-      font-size: 10px;
-      color: var(--text-2);
-      background: var(--surface-2);
-      border: 1px solid var(--border-hi);
-      border-radius: 4px;
-      padding: 2px 7px;
-      align-self: center;
-      text-align: center;
-      white-space: nowrap;
-    }
-    #hintCard .keybinds .v {
-      font-family: var(--font-mono);
-      font-size: 11px;
-      color: var(--text-2);
-      align-self: center;
-      letter-spacing: 0.02em;
-    }
-    #hintCard .hint-note {
-      font-family: var(--font-mono);
-      font-size: 9px;
-      color: var(--text-3);
-      border-top: 1px solid var(--border);
-      padding-top: 14px;
-      line-height: 1.6;
-      letter-spacing: 0.04em;
-    }
-    #hintCard .hint-note .accent { color: var(--accent); }
-
-    /* ── Loading bar ────────────────────────────────────────── */
-    #loadBar {
-      position: fixed; top: 0; left: 0; right: 0;
-      height: 2px; z-index: 100;
-      background: var(--surface-2);
-    }
-    #loadFill {
-      height: 100%;
-      background: linear-gradient(90deg, var(--accent), #005fff);
-      width: 0%;
-      transition: width 0.3s ease;
-      box-shadow: 0 0 8px var(--accent);
-    }
-
-    /* ── Toasts (info messages) ─────────────────────────────── */
-    #toast {
-      position: fixed;
-      top: 18px; left: 50%; transform: translateX(-50%);
-      z-index: 70;
-      background: rgba(8,12,16,0.92);
-      border: 1px solid var(--border-hi);
-      border-radius: 20px;
-      padding: 8px 20px;
-      font-family: var(--font-mono);
-      font-size: 11px;
-      color: var(--text-2);
-      letter-spacing: 0.06em;
-      pointer-events: none;
-      transition: opacity 0.4s;
-      backdrop-filter: blur(10px);
-      -webkit-backdrop-filter: blur(10px);
-    }
-
-    /* ── Labels container ───────────────────────────────────── */
-    #labelContainer {
-      position: fixed; inset: 0;
-      pointer-events: none; overflow: hidden; z-index: 10;
-    }
-
-    /* ── Navigation / Destination panel (bottom-left) ───────── */
-    #navPanel {
-      position: fixed;
-      bottom: 20px; left: 18px;
-      z-index: 60;
-      width: 210px;
-    }
-    #navToggle {
-      width: 100%;
-      display: flex; align-items: center; gap: 8px;
-      padding: 9px 14px;
-      background: rgba(8,12,16,0.88);
-      border: 1px solid var(--border-hi);
-      border-radius: var(--radius);
-      color: var(--text-2);
-      font-family: var(--font-ui);
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: 0.10em;
-      text-transform: uppercase;
-      cursor: pointer;
-      backdrop-filter: blur(18px);
-      -webkit-backdrop-filter: blur(18px);
-      transition: color 0.18s, border-color 0.18s, box-shadow 0.18s, border-radius 0.18s;
-      text-align: left;
-    }
-    #navToggle:hover {
-      color: var(--accent);
-      border-color: var(--accent);
-      box-shadow: 0 0 14px var(--accent-dim);
-    }
-    #navPanel.open #navToggle {
-      border-bottom-left-radius: 0;
-      border-bottom-right-radius: 0;
-      border-bottom-color: transparent;
-      color: var(--accent);
-    }
-    #navToggle .nav-icon { font-size: 14px; }
-    #navToggle .nav-label { flex: 1; }
-    #navToggle .nav-arrow {
-      font-size: 10px; color: var(--text-3);
-      transition: transform 0.2s;
-    }
-    #navPanel.open #navToggle .nav-arrow { transform: rotate(180deg); }
-
-    #navBody {
-      display: none;
-      background: rgba(8,12,16,0.92);
-      border: 1px solid var(--border-hi);
-      border-top: none;
-      border-bottom-left-radius: var(--radius);
-      border-bottom-right-radius: var(--radius);
-      backdrop-filter: blur(18px);
-      -webkit-backdrop-filter: blur(18px);
-      overflow: hidden;
-      max-height: 340px;
-      overflow-y: auto;
-    }
-    #navPanel.open #navBody { display: block; }
-
-    #navBody::-webkit-scrollbar { width: 3px; }
-    #navBody::-webkit-scrollbar-track { background: transparent; }
-    #navBody::-webkit-scrollbar-thumb { background: var(--border-hi); border-radius: 2px; }
-
-    .nav-section-label {
-      padding: 8px 14px 4px;
-      font-family: var(--font-mono);
-      font-size: 8px;
-      letter-spacing: 0.14em;
-      text-transform: uppercase;
-      color: var(--text-3);
-      border-top: 1px solid var(--border);
-    }
-    .nav-section-label:first-child { border-top: none; }
-
-    .nav-dest-btn {
-      width: 100%;
-      display: flex; align-items: center; gap: 10px;
-      padding: 9px 14px;
-      background: none;
-      border: none;
-      color: var(--text-2);
-      font-family: var(--font-ui);
-      font-size: 12px;
-      font-weight: 600;
-      letter-spacing: 0.04em;
-      cursor: pointer;
-      text-align: left;
-      transition: background 0.15s, color 0.15s;
-    }
-    .nav-dest-btn:hover {
-      background: rgba(0,200,255,0.07);
-      color: var(--text-1);
-    }
-    .nav-dest-btn.active {
-      background: rgba(0,200,255,0.12);
-      color: var(--accent);
-    }
-    .nav-dest-btn .dest-icon {
-      font-size: 13px;
-      flex-shrink: 0;
-      width: 20px; text-align: center;
-    }
-    .nav-dest-btn .dest-dist {
-      margin-left: auto;
-      font-family: var(--font-mono);
-      font-size: 9px;
-      color: var(--text-3);
-    }
-    .nav-dest-btn.active .dest-dist { color: var(--accent); }
-
-    /* clear route button */
-    #navClearBtn {
-      width: 100%;
-      padding: 8px 14px;
-      background: none;
-      border: none;
-      border-top: 1px solid var(--border);
-      color: var(--red);
-      font-family: var(--font-mono);
-      font-size: 9px;
-      font-weight: 500;
-      letter-spacing: 0.10em;
-      text-transform: uppercase;
-      cursor: pointer;
-      transition: background 0.15s;
-      display: none;
-    }
-    #navClearBtn:hover { background: rgba(255,77,106,0.08); }
-    #navPanel.has-route #navClearBtn { display: block; }
-  </style>
-</head>
-<body>
-
-  <!-- Loading progress -->
-  <div id="loadBar"><div id="loadFill"></div></div>
-
-  <!-- Wordmark -->
-  <div id="wordmark">
-    <div class="icon">⬡</div>
-    <div class="name">Floor<span>Nav</span></div>
-  </div>
-
-  <!-- View toggle button -->
-  <button id="viewBtn">
-    <span class="dot"></span>
-    <span id="viewBtnLabel">Overview</span>
-  </button>
-
-  <!-- Status / Positioning panel -->
-  <div id="statusPanel" class="panel">
-    <div class="panel-header">
-      <div class="pill">
-        <span class="led"></span>
-        <span id="posSource">WASD</span>
-      </div>
-      <div class="panel-title">Positioning</div>
-    </div>
-
-    <div class="coords">
-      <div class="coord-cell">
-        <div class="coord-label">X · East</div>
-        <div class="coord-val" id="coordX">—<span class="coord-unit">m</span></div>
-      </div>
-      <div class="coord-cell">
-        <div class="coord-label">Z · North</div>
-        <div class="coord-val" id="coordZ">—<span class="coord-unit">m</span></div>
-      </div>
-    </div>
-
-    <div class="acc-row">
-      <div class="acc-label">
-        <span>Accuracy</span>
-        <span class="acc-val" id="accVal">±0.0 m</span>
-      </div>
-      <div class="acc-track">
-        <div class="acc-fill" id="accFill" style="width:0%"></div>
-      </div>
-    </div>
-
-    <div class="routers" id="routerRows">
-      <!-- Injected by app.js -->
-    </div>
-
-    <div class="meta">
-      <span>Steps: <span class="step-count" id="stepCount">0</span></span>
-      <span>Hdg: <span id="headingVal">0°</span></span>
-    </div>
-  </div>
-
-  <!-- Minimap wrapper -->
-  <div id="minimap" class="panel">
-    <!-- canvas injected by app.js -->
-    <div id="minimapLabel">
-      <span>MAP</span>
-      <span class="src" id="mmSrc">WASD</span>
-    </div>
-  </div>
-
-  <!-- Legend bar -->
-  <div id="legend">
-    <div class="legend-key"><span class="kbd">W A S D</span><span class="lbl">Walk</span></div>
-    <div class="legend-key"><span class="kbd">Mouse</span><span class="lbl">Look</span></div>
-    <div class="legend-key"><span class="kbd">V</span><span class="lbl">View</span></div>
-    <div class="legend-key"><span class="kbd">Esc</span><span class="lbl">Unlock</span></div>
-    <div class="legend-key"><span class="kbd">Map</span><span class="lbl">Teleport</span></div>
-  </div>
-
-  <!-- Click-to-enter overlay -->
-  <div id="hintOverlay">
-    <div id="hintCard">
-      <span class="hint-icon">🏠</span>
-      <h1>Click to explore</h1>
-      <p>Click to capture mouse cursor · press Esc to release</p>
-      <div class="keybinds">
-        <span class="k">W A S D</span><span class="v">Walk around</span>
-        <span class="k">Mouse</span><span class="v">Look around</span>
-        <span class="k">V</span><span class="v">Toggle overview / FPS</span>
-        <span class="k">Esc</span><span class="v">Release cursor</span>
-        <span class="k">Map click</span><span class="v">Teleport instantly</span>
-      </div>
-      <div class="hint-note">
-        📡 Android WiFi trilateration + dead reckoning active when
-        <span class="accent">companion server</span> is running
-      </div>
-    </div>
-  </div>
-
-  <!-- Navigation / Destination panel -->
-  <div id="navPanel">
-    <button id="navToggle">
-      <span class="nav-icon">⬡</span>
-      <span class="nav-label">Destination</span>
-      <span class="nav-arrow">▼</span>
-    </button>
-    <div id="navBody">
-      <div class="nav-section-label">Rooms</div>
-      <!-- room buttons injected by app.js -->
-      <div id="navRooms"></div>
-      <div class="nav-section-label">Doors &amp; Gates</div>
-      <!-- door buttons injected by app.js -->
-      <div id="navDoors"></div>
-      <button id="navClearBtn">✕ &nbsp;Clear Route</button>
-    </div>
-  </div>
-
-  <!-- Room/door labels container -->
-  <div id="labelContainer"></div>
-
-  <!-- Toast message -->
-  <div id="toast" style="opacity:0"></div>
-
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Indoor Nav</title>
+ 
+  <!--
+    importmap MUST come before any module script.
+    Maps bare "three" and "three/addons/" to jsdelivr URLs.
+    OrbitControls & GLTFLoader internally import from "three" —
+    without this they fail even if app.js uses full URLs.
+  -->
   <script type="importmap">
   {
     "imports": {
-      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three":         "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
       "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
     }
   }
   </script>
-
+ 
+  <style>
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    body{background:#08101e;overflow:hidden;font-family:'Segoe UI',system-ui,sans-serif;color:#c8e0ff}
+    canvas{display:block}
+ 
+    /* LOADER */
+    #loader{
+      position:fixed;inset:0;background:#08101e;
+      display:flex;flex-direction:column;align-items:center;justify-content:center;
+      z-index:999;transition:opacity .6s;
+    }
+    #loader .logo{font-size:1.1rem;letter-spacing:.25em;color:#00d4ff;text-transform:uppercase;margin-bottom:28px}
+    .bar-wrap{width:220px;height:3px;background:rgba(255,255,255,.08);border-radius:4px;overflow:hidden}
+    .bar-fill{height:100%;width:0%;background:linear-gradient(90deg,#00d4ff,#00ffaa);animation:fillBar 2.5s ease-out forwards}
+    @keyframes fillBar{to{width:90%}}
+    #loadPct{margin-top:12px;font-size:.78rem;color:rgba(200,224,255,.5);letter-spacing:.1em}
+ 
+    /* HUD */
+    #hud{
+      position:fixed;top:14px;left:14px;
+      background:rgba(8,16,30,.85);border:1px solid rgba(0,200,255,.22);
+      border-radius:10px;padding:12px 16px;backdrop-filter:blur(8px);
+      min-width:200px;pointer-events:none;z-index:50;
+    }
+    #hud h3{font-size:.7rem;letter-spacing:.18em;color:#00d4ff;text-transform:uppercase;
+      margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid rgba(0,200,255,.15)}
+    .hud-row{display:flex;justify-content:space-between;gap:16px;margin-bottom:5px;font-size:.78rem}
+    .hud-label{color:rgba(200,224,255,.45)}
+    .hud-val{color:#e0f4ff;font-variant-numeric:tabular-nums}
+    .anchor{color:#ffaa00;font-size:.72rem}
+ 
+    /* PANEL */
+    #panel{position:fixed;top:14px;right:14px;display:flex;flex-direction:column;gap:8px;z-index:50}
+    .btn-group{
+      display:flex;gap:5px;
+      background:rgba(8,16,30,.85);border:1px solid rgba(0,200,255,.18);
+      border-radius:9px;padding:6px;backdrop-filter:blur(8px);
+    }
+    .btn{
+      background:transparent;color:rgba(200,224,255,.6);
+      border:1px solid rgba(0,200,255,.18);border-radius:7px;
+      padding:7px 13px;font-size:.78rem;cursor:pointer;transition:all .18s;white-space:nowrap;
+    }
+    .btn:hover{background:rgba(0,200,255,.1);color:#e0f4ff;border-color:rgba(0,200,255,.4)}
+    .btn.active{background:rgba(0,200,255,.2);color:#00d4ff;border-color:#00d4ff}
+    .btn.danger{color:rgba(255,100,100,.7);border-color:rgba(255,100,100,.2)}
+    .btn.danger:hover{background:rgba(255,80,80,.12);color:#ff6666;border-color:rgba(255,100,100,.5)}
+ 
+    /* FLOOR BUTTONS */
+    #floors{
+      position:fixed;bottom:18px;left:50%;transform:translateX(-50%);
+      display:flex;gap:6px;
+      background:rgba(8,16,30,.88);border:1px solid rgba(0,200,255,.18);
+      border-radius:40px;padding:7px 12px;backdrop-filter:blur(10px);z-index:50;
+    }
+    .floor-btn{
+      background:transparent;color:rgba(200,224,255,.5);
+      border:1px solid rgba(0,200,255,.15);border-radius:30px;
+      padding:6px 18px;font-size:.8rem;cursor:pointer;transition:all .18s;
+    }
+    .floor-btn:hover{background:rgba(0,200,255,.08);color:#c8e0ff}
+    .floor-btn.active{background:rgba(0,200,255,.2);color:#00d4ff;border-color:#00d4ff;font-weight:600}
+ 
+    /* LEGEND */
+    #legend{
+      position:fixed;bottom:18px;left:14px;
+      background:rgba(8,16,30,.78);border:1px solid rgba(0,200,255,.14);
+      border-radius:9px;padding:10px 14px;
+      font-size:.72rem;line-height:1.9;color:rgba(200,224,255,.5);
+      pointer-events:none;z-index:50;backdrop-filter:blur(6px);
+    }
+    .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px;vertical-align:middle}
+ 
+    /* TOAST */
+    #toast{
+      position:fixed;bottom:80px;left:50%;transform:translateX(-50%) translateY(10px);
+      background:rgba(0,20,40,.9);border:1px solid rgba(0,200,255,.35);
+      border-radius:30px;padding:9px 22px;
+      font-size:.82rem;color:#c8e0ff;
+      opacity:0;pointer-events:none;
+      transition:opacity .3s,transform .3s;
+      z-index:100;white-space:nowrap;backdrop-filter:blur(8px);
+    }
+  </style>
+</head>
+<body>
+ 
+  <div id="loader">
+    <div class="logo">Indoor Navigation</div>
+    <div class="bar-wrap"><div class="bar-fill"></div></div>
+    <div id="loadPct">Initialising…</div>
+  </div>
+ 
+  <div id="hud">
+    <h3>📍 Position</h3>
+    <div id="hudContent"></div>
+  </div>
+ 
+  <div id="panel">
+    <div class="btn-group">
+      <button class="btn active" id="btnOverview">🗺 Overview</button>
+      <button class="btn"        id="btnOrbit">🔄 Orbit</button>
+      <button class="btn"        id="btnPOV">👁 POV</button>
+    </div>
+    <div class="btn-group">
+      <button class="btn"        id="btnNav">📍 Navigate</button>
+      <button class="btn danger" id="btnClear">✕ Clear</button>
+    </div>
+    <div class="btn-group">
+      <button class="btn"        id="btnWifi">📡 WiFi Fix</button>
+    </div>
+  </div>
+ 
+  <div id="floors">
+    <button class="floor-btn"        data-floor="0">↓ Lower</button>
+    <button class="floor-btn active" data-floor="1">🏠 Mine</button>
+    <button class="floor-btn"        data-floor="2">↑ Upper</button>
+  </div>
+ 
+  <div id="legend">
+    <span class="dot" style="background:#00d4ff"></span>Walls &nbsp;
+    <span class="dot" style="background:#ff3333"></span>You &nbsp;
+    <span class="dot" style="background:#ffaa00"></span>Your router &nbsp;
+    <span class="dot" style="background:#ff6622"></span>Neighbour router<br>
+    <span class="dot" style="background:#00ffaa"></span>Path / Beacon &nbsp;
+    <span class="dot" style="background:#ffff00"></span>Destination<br>
+    <b style="color:rgba(200,224,255,.35)">WASD / ↑↓←→</b> Move &nbsp;
+    <b style="color:rgba(200,224,255,.35)">1 2 3</b> Views &nbsp;
+    <b style="color:rgba(200,224,255,.35)">N</b> Navigate
+  </div>
+ 
+  <div id="toast"></div>
+ 
+  <!-- type="module" required for ES imports in app.js -->
   <script type="module" src="app.js"></script>
+ 
 </body>
 </html>

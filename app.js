@@ -1,1172 +1,804 @@
-import * as THREE from "three";
-import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
-
-// ═══════════════════════════════════════════════════════════════
-//  LAYOUT  (from Layout.json — all coords in flat-space metres)
-// ═══════════════════════════════════════════════════════════════
+// ================================================================
+//  INDOOR NAVIGATION — app.js
+//  Imports MUST be first. Nothing above them. Ever.
+// ================================================================
+import * as THREE        from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { GLTFLoader }    from "three/addons/loaders/GLTFLoader.js";
+ 
+// ================================================================
+//  FLAT LAYOUT  (from Layout.json)
+//  All coords relative to Main Entrance = origin (0,0)
+//  X: -8.5 → 4.5    Z: -14 → 11.5
+// ================================================================
+const FLAT  = { minX:-8.5, maxX:4.5, minZ:-14, maxZ:11.5 };
+const CX    = (FLAT.minX + FLAT.maxX) / 2;   // -2
+const CZ    = (FLAT.minZ + FLAT.maxZ) / 2;   // -1.25
+const FW    = FLAT.maxX - FLAT.minX;          // 13
+const FD    = FLAT.maxZ - FLAT.minZ;          // 25.5
+ 
+// ================================================================
+//  FLOOR CONFIG
+//  Each flat has ONE router inside it.
+//  Trilateration = ownRouter + router below + router above.
+//  ⚠️  Replace x/z/bssid when you measure real values.
+// ================================================================
+const FLOORS = {
+  0: {
+    label: "Lower Flat",
+    router: { id:"LF", x:-5.8, z:6.2,  label:"Lower Router", bssid:"AA:BB:CC:DD:EE:01" }
+  },
+  1: {
+    label: "Your Flat",
+    router: { id:"MF", x:-3.4, z:-2.1, label:"Your Router",  bssid:"AA:BB:CC:DD:EE:02" }
+  },
+  2: {
+    label: "Upper Flat",
+    router: { id:"UF", x:1.8,  z:8.4,  label:"Upper Router", bssid:"AA:BB:CC:DD:EE:03" }
+  }
+};
+ 
+// ================================================================
+//  WALLS  [x1, z1, x2, z2]
+// ================================================================
+const WALLS = [
+  [-8.5,-14,  -8.5,-2.5],
+  [-8.5,-2.5,  -3, -2.5],
+  [ -6,  4,    -3,  4  ],
+  [ -6,  4,    -6, 11.5],
+  [  2.5,11.5,  2.5, 4 ],
+  [  2.5,11.5, -6, 11.5],
+  [  2.5, 4,    0,  4  ],
+  [  0,  4,    0, -2.5 ],
+  [  0, -2.5,  4.5,-2.5],
+  [  4.5,-2.5, 4.5,-14 ],
+  [  4.5,-14, -8.5,-14 ],
+  [ -3, -2.5, -3,  4   ],
+  [  0,  4,   -3,  4   ],
+  [-8.5,-7.5, -6.5,-7.5],
+  [  0,  1.5, -1,  1.5 ],
+  [  4.5,-8.5,-0.5,-8.5],
+];
+ 
 const ROOMS = [
-  { name: "Room",          polygon: [[-6,4],[2.5,4],[2.5,11.5],[-6,11.5]] },
-  { name: "Hall",          polygon: [[-8.5,-14],[-8.5,-2.5],[-3,-2.5],[-3,-14]] },
-  { name: "Kitchen",       polygon: [[0,-2.5],[4.5,-2.5],[4.5,-8],[0,-8]] },
-  { name: "Main Entrance", polygon: [[0,-8],[0,-14],[4.5,-14],[4.5,-8]] },
-  { name: "Corridor",      polygon: [[-3,-14],[0,-14],[0,4],[-3,4]] },
+  { label:"Hall",     cx:-5.75, cz:-8.25 },
+  { label:"Corridor", cx:-1.5,  cz:-5.0  },
+  { label:"Kitchen",  cx: 2.25, cz:-5.25 },
+  { label:"Entrance", cx: 2.25, cz:-11.0 },
+  { label:"Bedroom",  cx:-1.75, cz: 7.75 },
 ];
-
-const DOOR_LABELS = [
-  { name: "Main Gate",    x: 4.5,  z: -13  },
-  { name: "Aahan Gate",   x: -0.5, z: -14  },
-  { name: "Balcony Gate", x: -8.5, z: -4   },
-  { name: "Sandeep Room", x: 0,    z: 3    },
-  { name: "Washroom",     x: 0,    z: 0.5  },
-];
-
-const FLAT_BOUNDS = { minX: -8.5, maxX: 4.5, minZ: -14, maxZ: 11.5 };
-
-// ───────────────────────────────────────────────────────────────
-//  WIFI ROUTERS
-// ───────────────────────────────────────────────────────────────
-const ROUTER_BOX = { w: 0.305, h: 0.740, d: 0.210 };
-
-const ROUTERS = [
-  {
-    id:       "yours",
-    label:    "Your Router",
-    bssid:    "AA:BB:CC:DD:EE:01",
-    pos:      new THREE.Vector3(-3.5, 1.5, -2.5 + ROUTER_BOX.d / 2),
-    wallNorm: new THREE.Vector3(0, 0, 1),
-    txPower:  -45,
-    pathLoss: 2.8,
-    color:    0x00e5a0,
-    floor:    0,
+ 
+// ================================================================
+//  A*  PATHFINDING
+// ================================================================
+let navCache = null;
+ 
+function buildGrid() {
+  if (navCache) return navCache;
+  const RES = 0.4;
+  const cols = Math.ceil(FW / RES) + 4;
+  const rows = Math.ceil(FD / RES) + 4;
+  const grid = Array.from({length:rows}, ()=>new Uint8Array(cols));
+ 
+  const w2g = (wx,wz) => [
+    Math.round((wx - FLAT.minX) / RES),
+    Math.round((wz - FLAT.minZ) / RES),
+  ];
+ 
+  for (const [x1,z1,x2,z2] of WALLS) {
+    const steps = Math.ceil(Math.hypot(x2-x1,z2-z1) / (RES*0.4));
+    for (let i=0; i<=steps; i++) {
+      const t=i/steps;
+      const [c,r] = w2g(x1+(x2-x1)*t, z1+(z2-z1)*t);
+      for (let dr=-1;dr<=1;dr++)
+        for (let dc=-1;dc<=1;dc++) {
+          const nr=r+dr, nc=c+dc;
+          if (nr>=0&&nr<rows&&nc>=0&&nc<cols) grid[nr][nc]=1;
+        }
+    }
+  }
+ 
+  navCache = {
+    grid, cols, rows, w2g,
+    g2w:(c,r)=>({ x:FLAT.minX+c*RES, z:FLAT.minZ+r*RES }),
+  };
+  return navCache;
+}
+ 
+function aStar(sx,sz,ex,ez) {
+  const {grid,cols,rows,w2g,g2w} = buildGrid();
+  const [sc,sr]=w2g(sx,sz), [ec,er]=w2g(ex,ez);
+  const key=(c,r)=>r*cols+c;
+  const h=(c,r)=>Math.abs(c-ec)+Math.abs(r-er);
+  const DIRS=[[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]];
+  const open=new Map([[key(sc,sr),h(sc,sr)]]);
+  const gS=new Map([[key(sc,sr),0]]);
+  const from=new Map();
+ 
+  for (let it=0; open.size>0&&it<80000; it++) {
+    let bk=null,bf=Infinity;
+    for (const [k,f] of open) { if(f<bf){bf=f;bk=k;} }
+    if (!bk) break;
+    const cr=Math.floor(bk/cols), cc=bk%cols;
+    if (cc===ec&&cr===er) {
+      const path=[]; let cur=bk;
+      while(from.has(cur)){path.push(g2w(cur%cols,Math.floor(cur/cols)));cur=from.get(cur);}
+      path.push(g2w(sc,sr));
+      return path.reverse();
+    }
+    open.delete(bk);
+    const g=gS.get(bk);
+    for (const [dc,dr] of DIRS) {
+      const nc=cc+dc,nr=cr+dr;
+      if(nc<0||nc>=cols||nr<0||nr>=rows||grid[nr][nc]) continue;
+      const ng=g+(dc&&dr?1.414:1), nk=key(nc,nr);
+      if(ng<(gS.get(nk)??Infinity)){gS.set(nk,ng);from.set(nk,bk);open.set(nk,ng+h(nc,nr));}
+    }
+  }
+  return null;
+}
+ 
+// ================================================================
+//  WIFI TRILATERATION
+//  ⚠️  ANDROID: replace getSimRSSI() with real WifiManager.getScanResults()
+//               match by .BSSID → use .level (dBm)
+// ================================================================
+function getSimRSSI(ux,uz) {
+  const out={};
+  for (const [fid,cfg] of Object.entries(FLOORS)) {
+    const r=cfg.router;
+    const d=Math.max(0.5,Math.hypot(ux-r.x,uz-r.z));
+    out[fid]=-59-20*Math.log10(d)+(Math.random()-0.5)*3;
+  }
+  return out;
+}
+function rssi2d(rssi,txP=-59,n=2.5){ return Math.pow(10,(txP-rssi)/(10*n)); }
+ 
+function trilat3(r1,d1,r2,d2,r3,d3){
+  const A=2*(r2.x-r1.x),B=2*(r2.z-r1.z);
+  const C=d1*d1-d2*d2-r1.x*r1.x+r2.x*r2.x-r1.z*r1.z+r2.z*r2.z;
+  const D=2*(r3.x-r2.x),E=2*(r3.z-r2.z);
+  const F=d2*d2-d3*d3-r2.x*r2.x+r3.x*r3.x-r2.z*r2.z+r3.z*r3.z;
+  const det=A*E-D*B;
+  if(Math.abs(det)<0.001) return trilat2(r1,d1,r2,d2);
+  return {x:(C*E-F*B)/det,z:(C*D-A*F)/(B*D-E*A)};
+}
+function trilat2(r1,d1,r2,d2){
+  const dx=r2.x-r1.x,dz=r2.z-r1.z;
+  const d=Math.sqrt(dx*dx+dz*dz)||0.001;
+  const a=(d1*d1-d2*d2+d*d)/(2*d);
+  return {x:r1.x+(a/d)*dx,z:r1.z+(a/d)*dz};
+}
+ 
+function runTrilat(fi){
+  const rssi=getSimRSSI(user.x,user.z);
+  const anchors=[];
+  [fi, fi-1, fi+1].forEach(id=>{
+    if(FLOORS[id]) anchors.push({r:FLOORS[id].router, d:rssi2d(rssi[id])});
+  });
+  if(anchors.length>=3) return trilat3(anchors[0].r,anchors[0].d,anchors[1].r,anchors[1].d,anchors[2].r,anchors[2].d);
+  if(anchors.length===2) return trilat2(anchors[0].r,anchors[0].d,anchors[1].r,anchors[1].d);
+  return null;
+}
+ 
+// ================================================================
+//  USER STATE
+// ================================================================
+const user={
+  x:2.25, z:-11.0, heading:0, floor:1,
+ 
+  wifiCorrect(){
+    const fix=runTrilat(this.floor); if(!fix)return;
+    const fx=Math.max(FLAT.minX+0.3,Math.min(FLAT.maxX-0.3,fix.x));
+    const fz=Math.max(FLAT.minZ+0.3,Math.min(FLAT.maxZ-0.3,fix.z));
+    this.x=this.x*0.6+fx*0.4; this.z=this.z*0.6+fz*0.4; this.clamp();
   },
-  {
-    id:       "above",
-    label:    "Above Floor",
-    bssid:    "AA:BB:CC:DD:EE:02",
-    pos:      new THREE.Vector3(-3.5, 1.5 + 3.0, -2.5 + ROUTER_BOX.d / 2),
-    wallNorm: new THREE.Vector3(0, 0, 1),
-    txPower:  -48,
-    pathLoss: 3.2,
-    color:    0xff6644,
-    floor:    1,
+  // ⚠️ QR: call user.qrReset(x,z) when QR scanned
+  qrReset(x,z){ this.x=x;this.z=z;this.clamp();syncAvatar();updateHUD();toast(`📍 QR reset (${x.toFixed(1)},${z.toFixed(1)})`); },
+  clamp(){
+    this.x=Math.max(FLAT.minX+0.3,Math.min(FLAT.maxX-0.3,this.x));
+    this.z=Math.max(FLAT.minZ+0.3,Math.min(FLAT.maxZ-0.3,this.z));
   },
-  {
-    id:       "below",
-    label:    "Below Floor",
-    bssid:    "AA:BB:CC:DD:EE:03",
-    pos:      new THREE.Vector3(-3.5, 1.5 - 3.0, -2.5 + ROUTER_BOX.d / 2),
-    wallNorm: new THREE.Vector3(0, 0, 1),
-    txPower:  -48,
-    pathLoss: 3.2,
-    color:    0x00c8ff,
-    floor:    -1,
-  },
-];
-
-// ───────────────────────────────────────────────────────────────
-//  SPAWN & CONSTANTS
-// ───────────────────────────────────────────────────────────────
-const SPAWN      = { x: 3.5, z: -13, yaw: Math.PI };
-const EYE_HEIGHT = 0.6;
-const FLOOR_Y    = 0;
-
-const ACCEL    = 18;
-const FRICTION = 12;
-const MAX_SPD  = 6;
-
-const MOUSE_SENS = 0.0018;
-const TOUCH_SENS = 0.004;
-const PITCH_LIMIT = Math.PI / 2 - 0.05;
-
-// ═══════════════════════════════════════════════════════════════
-//  SCENE
-// ═══════════════════════════════════════════════════════════════
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x080c10);
-scene.fog = new THREE.FogExp2(0x080c10, 0.018);
-
-// ── FPS rig ──────────────────────────────────────────────────
-const yawObj   = new THREE.Object3D();
-const pitchObj = new THREE.Object3D();
-const fpsCam   = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.02, 500);
-yawObj.add(pitchObj);
-pitchObj.add(fpsCam);
-scene.add(yawObj);
-
-// ── Overview camera ──────────────────────────────────────────
-const ovCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 200);
-ovCam.position.set(0, 60, 0);
-ovCam.lookAt(0, 0, 0);
-scene.add(ovCam);
-
-let activeCamera = fpsCam;
-let cameraMode   = "fps";
-
-let scaleFactor = 1;
-let eyeY        = EYE_HEIGHT;
-let bounds      = null;
-
-let yaw   = SPAWN.yaw;
-let pitch = 0;
-
-// ═══════════════════════════════════════════════════════════════
-//  RENDERER
-// ═══════════════════════════════════════════════════════════════
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type    = THREE.PCFSoftShadowMap;
+};
+ 
+// ================================================================
+//  THREE.JS SCENE
+// ================================================================
+const scene    = new THREE.Scene();
+scene.background = new THREE.Color(0x08101e);
+scene.fog      = new THREE.FogExp2(0x08101e, 0.008);
+ 
+const camera   = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.05, 500);
+ 
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(innerWidth,innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.shadowMap.enabled=true;
+renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+renderer.toneMapping=THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure=1.1;
 document.body.appendChild(renderer.domElement);
-
-// ═══════════════════════════════════════════════════════════════
-//  LIGHTS
-// ═══════════════════════════════════════════════════════════════
-scene.add(new THREE.AmbientLight(0xfff5e0, 1.6));
-
-const sun = new THREE.DirectionalLight(0xfff0d0, 2.8);
-sun.position.set(15, 25, 10);
-sun.castShadow = true;
-sun.shadow.mapSize.set(2048, 2048);
-sun.shadow.camera.near   = 0.5;
-sun.shadow.camera.far    = 200;
-sun.shadow.camera.left   = -30;
-sun.shadow.camera.right  = 30;
-sun.shadow.camera.top    = 30;
-sun.shadow.camera.bottom = -30;
+ 
+// Lights
+scene.add(new THREE.AmbientLight(0xaabbcc, 1.2));
+const sun=new THREE.DirectionalLight(0xffffff,1.5);
+sun.position.set(5,20,10); sun.castShadow=true;
+sun.shadow.mapSize.setScalar(2048);
+sun.shadow.camera.left=sun.shadow.camera.bottom=-30;
+sun.shadow.camera.right=sun.shadow.camera.top=30;
 scene.add(sun);
-
-const fill = new THREE.DirectionalLight(0xc0d8ff, 0.7);
-fill.position.set(-10, 10, -10);
-scene.add(fill);
-
-// ═══════════════════════════════════════════════════════════════
-//  PLAYER POSITION STATE
-// ═══════════════════════════════════════════════════════════════
-const playerPos = new THREE.Vector2(SPAWN.x, SPAWN.z);
-
-// ═══════════════════════════════════════════════════════════════
-//  PLAYER MARKER
-// ═══════════════════════════════════════════════════════════════
-const playerDot = new THREE.Group();
-playerDot.renderOrder = 999;
-scene.add(playerDot);
-
-const haloGeo  = new THREE.CircleGeometry(1.2, 48);
-const haloMat  = new THREE.MeshBasicMaterial({ color: 0x2196f3, transparent: true, opacity: 0.10, depthWrite: false, side: THREE.DoubleSide });
-const haloMesh = new THREE.Mesh(haloGeo, haloMat);
-haloMesh.rotation.x = -Math.PI / 2;
-playerDot.add(haloMesh);
-
-const pulseGeo  = new THREE.RingGeometry(0.38, 0.48, 48);
-const pulseMat  = new THREE.MeshBasicMaterial({ color: 0x00c8ff, transparent: true, opacity: 0.55, depthWrite: false, side: THREE.DoubleSide });
-const pulseMesh = new THREE.Mesh(pulseGeo, pulseMat);
-pulseMesh.rotation.x = -Math.PI / 2;
-playerDot.add(pulseMesh);
-
-const borderGeo  = new THREE.RingGeometry(0.22, 0.33, 48);
-const borderMat  = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.95, depthWrite: false, side: THREE.DoubleSide });
-const borderMesh = new THREE.Mesh(borderGeo, borderMat);
-borderMesh.rotation.x = -Math.PI / 2;
-playerDot.add(borderMesh);
-
-const coreGeo  = new THREE.CircleGeometry(0.22, 48);
-const coreMat  = new THREE.MeshBasicMaterial({ color: 0x0055cc, transparent: true, opacity: 1.0, depthWrite: false, side: THREE.DoubleSide });
-const coreMesh = new THREE.Mesh(coreGeo, coreMat);
-coreMesh.rotation.x = -Math.PI / 2;
-playerDot.add(coreMesh);
-
-const beamShape = new THREE.Shape();
-beamShape.moveTo( 0, 0); beamShape.lineTo(0.09, 0); beamShape.lineTo(0.045, 0.7); beamShape.closePath();
-const beamGeo  = new THREE.ShapeGeometry(beamShape);
-const beamMat  = new THREE.MeshBasicMaterial({ color: 0x0055cc, transparent: true, opacity: 0.85, depthWrite: false, side: THREE.DoubleSide });
-const beamMesh = new THREE.Mesh(beamGeo, beamMat);
-beamMesh.rotation.x = -Math.PI / 2;
-beamMesh.position.set(-0.045, 0.002, 0);
-playerDot.add(beamMesh);
-
-let pulsePhase = 0;
-
-// ═══════════════════════════════════════════════════════════════
-//  ROUTER MARKERS
-// ═══════════════════════════════════════════════════════════════
-const routerMarkers = [];
-
-function buildRouterMesh(r) {
-  const group = new THREE.Group();
-  group.userData.router = r;
-  const isOtherFloor = r.floor !== 0;
-
-  const bodyGeo = new THREE.BoxGeometry(ROUTER_BOX.w, ROUTER_BOX.h, ROUTER_BOX.d);
-  const bodyMat = new THREE.MeshStandardMaterial({ color: 0x1a2030, roughness: 0.6, metalness: 0.5, transparent: isOtherFloor, opacity: isOtherFloor ? 0.35 : 1.0 });
-  group.add(new THREE.Mesh(bodyGeo, bodyMat));
-
-  const stripeGeo = new THREE.BoxGeometry(ROUTER_BOX.w, 0.04, ROUTER_BOX.d + 0.002);
-  const stripeMat = new THREE.MeshBasicMaterial({ color: r.color, transparent: isOtherFloor, opacity: isOtherFloor ? 0.4 : 1.0 });
-  const stripe = new THREE.Mesh(stripeGeo, stripeMat);
-  stripe.position.y = ROUTER_BOX.h / 2 - 0.02;
-  group.add(stripe);
-
-  const ledGeo = new THREE.SphereGeometry(0.018, 8, 6);
-  const ledMat = new THREE.MeshBasicMaterial({ color: r.color });
-  const led    = new THREE.Mesh(ledGeo, ledMat);
-  led.position.set(ROUTER_BOX.w * 0.3, ROUTER_BOX.h * 0.3, ROUTER_BOX.d / 2 + 0.005);
-  group.add(led);
-
-  const ringGeo = new THREE.RingGeometry(0.022, 0.034, 16);
-  const ringMat = new THREE.MeshBasicMaterial({ color: r.color, side: THREE.DoubleSide, transparent: true, opacity: 0.45 });
-  const ring = new THREE.Mesh(ringGeo, ringMat);
-  ring.position.copy(led.position); ring.position.z += 0.001;
-  group.add(ring);
-
-  for (let i = 1; i <= 3; i++) {
-    const arcGeo = new THREE.RingGeometry(i * 0.05, i * 0.05 + 0.008, 20, 1, -Math.PI * 0.35, Math.PI * 0.7);
-    const arcMat = new THREE.MeshBasicMaterial({ color: r.color, side: THREE.DoubleSide, transparent: true, opacity: 0.5 / i });
-    const arc = new THREE.Mesh(arcGeo, arcMat);
-    arc.position.set(ROUTER_BOX.w * 0.3, ROUTER_BOX.h * 0.3, ROUTER_BOX.d / 2 + 0.002 + i * 0.001);
-    arc.rotation.z = Math.PI / 2;
-    group.add(arc);
+ 
+// Soft room accent lights
+[[-5.75,3,-8.25,0x4477ff,12,12],[-1.5,3,-5,0x44ffaa,12,12],[2.25,3,-7,0xffaa44,12,12],[-1.75,3,7.75,0xaa44ff,12,12]]
+  .forEach(([x,y,z,c,i,d])=>{const l=new THREE.PointLight(c,i,d);l.position.set(x,y,z);scene.add(l);});
+ 
+const controls=new OrbitControls(camera,renderer.domElement);
+controls.enableDamping=true; controls.dampingFactor=0.07;
+controls.minDistance=1; controls.maxDistance=150;
+controls.target.set(CX,0,CZ);
+ 
+// ================================================================
+//  OVERLAY — walls, floor, routers, labels
+// ================================================================
+let overlay=null;
+ 
+function buildOverlay(fi){
+  if(overlay){ scene.remove(overlay); overlay=null; }
+  const g=new THREE.Group(); g.name="overlay";
+ 
+  // ── Floor plane (dark teal, clickable) ──
+  const floor=new THREE.Mesh(
+    new THREE.PlaneGeometry(FW+1,FD+1),
+    new THREE.MeshStandardMaterial({color:0x0d2233,roughness:1,metalness:0})
+  );
+  floor.name="floorPlane";
+  floor.rotation.x=-Math.PI/2;
+  floor.position.set(CX,-0.01,CZ);
+  floor.receiveShadow=true;
+  g.add(floor);
+ 
+  // ── Grid ──
+  const grid=new THREE.GridHelper(Math.max(FW,FD)+6,32,0x1a3040,0x1a3040);
+  grid.position.set(CX,0.005,CZ);
+  g.add(grid);
+ 
+  // ── Walls ──
+  const wallMat=new THREE.MeshStandardMaterial({
+    color:0x00c8ff, emissive:0x004466, emissiveIntensity:0.6,
+    roughness:0.4, transparent:true, opacity:0.88
+  });
+  for (const [x1,z1,x2,z2] of WALLS) {
+    const len=Math.hypot(x2-x1,z2-z1);
+    const angle=Math.atan2(x2-x1,z2-z1);
+    const mx=(x1+x2)/2, mz=(z1+z2)/2;
+ 
+    const wall=new THREE.Mesh(new THREE.BoxGeometry(0.2,2.8,len),wallMat.clone());
+    wall.position.set(mx,1.4,mz);
+    wall.rotation.y=angle;
+    wall.castShadow=true;
+    g.add(wall);
+ 
+    // Glowing top cap
+    const cap=new THREE.Mesh(
+      new THREE.BoxGeometry(0.08,0.06,len),
+      new THREE.MeshBasicMaterial({color:0x00ffff})
+    );
+    cap.position.set(mx,2.83,mz);
+    cap.rotation.y=angle;
+    g.add(cap);
   }
-
-  if (isOtherFloor) {
-    const labelGeo = new THREE.PlaneGeometry(ROUTER_BOX.w * 1.6, 0.12);
-    const canvas   = document.createElement("canvas");
-    canvas.width = 256; canvas.height = 48;
-    const ctx = canvas.getContext("2d");
-    ctx.fillStyle = "#00000088";
-    ctx.roundRect?.(0, 0, 256, 48, 8); ctx.fill();
-    ctx.font = "bold 18px 'DM Mono', monospace";
-    ctx.fillStyle = "#" + r.color.toString(16).padStart(6,"0");
-    ctx.textAlign = "center"; ctx.textBaseline = "middle";
-    ctx.fillText(r.label, 128, 24);
-    const tex  = new THREE.CanvasTexture(canvas);
-    const lMat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, side: THREE.DoubleSide });
-    const lMesh = new THREE.Mesh(labelGeo, lMat);
-    lMesh.position.set(0, ROUTER_BOX.h / 2 + 0.1, ROUTER_BOX.d / 2);
-    group.add(lMesh);
+ 
+  // ── Room labels ──
+  for(const r of ROOMS){
+    const sp=makeSprite(r.label,28,"rgba(160,210,255,0.8)");
+    sp.position.set(r.cx,3.2,r.cz);
+    sp.scale.set(6,2,1);
+    g.add(sp);
   }
-
-  scene.add(group);
-  return group;
+ 
+  // ── Routers: own (inside flat) + neighbor floors ──
+  const own  =FLOORS[fi].router;
+  const below=FLOORS[fi-1]?.router ?? null;
+  const above=FLOORS[fi+1]?.router ?? null;
+ 
+  function addRouter(r, isOwn, tag){
+    const col  = isOwn ? 0xffaa00 : 0xff6622;
+    const size = isOwn ? 0.30 : 0.20;
+    const yPos = 1.6;
+ 
+    // Sphere
+    const sph=new THREE.Mesh(
+      new THREE.SphereGeometry(size,20,20),
+      new THREE.MeshStandardMaterial({color:col,emissive:col,emissiveIntensity:isOwn?1.4:0.6})
+    );
+    sph.position.set(r.x,yPos,r.z);
+    g.add(sph);
+ 
+    // Animated ripple ring (pulsed in animate loop)
+    const ring=new THREE.Mesh(
+      new THREE.RingGeometry(0.5,0.58,40),
+      new THREE.MeshBasicMaterial({color:col,transparent:true,opacity:isOwn?0.5:0.25,side:THREE.DoubleSide})
+    );
+    ring.name="routerRing";
+    ring.rotation.x=-Math.PI/2;
+    ring.position.set(r.x,0.06,r.z);
+    g.add(ring);
+ 
+    // Label
+    const lbl=makeSprite(`${tag} ${r.label}`,isOwn?24:18,
+      isOwn?"rgba(255,190,0,1)":"rgba(255,130,60,0.85)");
+    lbl.position.set(r.x,yPos+0.65,r.z);
+    lbl.scale.set(5,1.6,1);
+    g.add(lbl);
+ 
+    // Vertical dashed line down to floor (thin cylinder)
+    const line=new THREE.Mesh(
+      new THREE.CylinderGeometry(0.02,0.02,yPos,6),
+      new THREE.MeshBasicMaterial({color:col,transparent:true,opacity:0.3})
+    );
+    line.position.set(r.x,yPos/2,r.z);
+    g.add(line);
+  }
+ 
+  addRouter(own,  true,  "📡");
+  if(below) addRouter(below, false, "↓");
+  if(above) addRouter(above, false, "↑");
+ 
+  scene.add(g);
+  overlay=g;
 }
-
-// ═══════════════════════════════════════════════════════════════
-//  UI ELEMENT REFS
-// ═══════════════════════════════════════════════════════════════
-const hintOverlay  = document.getElementById("hintOverlay");
-const viewBtn      = document.getElementById("viewBtn");
-const viewBtnLabel = document.getElementById("viewBtnLabel");
-const loadFill     = document.getElementById("loadFill");
-const toast        = document.getElementById("toast");
-const mmLabel      = document.getElementById("mmSrc");
-const routerRows   = document.getElementById("routerRows");
-const minimapWrap  = document.getElementById("minimap");
-
-let toastTimer = null;
-function showToast(msg, dur = 3500) {
-  toast.textContent = msg;
-  toast.style.opacity = "1";
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { toast.style.opacity = "0"; }, dur);
+ 
+// ================================================================
+//  USER AVATAR  (red puck + direction arrow + pulse ring)
+// ================================================================
+let avatar=null;
+ 
+function buildAvatar(){
+  if(avatar){scene.remove(avatar);avatar=null;}
+  const g=new THREE.Group(); g.name="avatar";
+ 
+  // Body puck
+  const body=new THREE.Mesh(
+    new THREE.CylinderGeometry(0.32,0.32,0.14,32),
+    new THREE.MeshStandardMaterial({color:0xff2222,emissive:0xff2222,emissiveIntensity:1.4})
+  );
+  g.add(body);
+ 
+  // Pulse ring
+  const ring=new THREE.Mesh(
+    new THREE.RingGeometry(0.46,0.62,48),
+    new THREE.MeshBasicMaterial({color:0xff4444,transparent:true,opacity:0.55,side:THREE.DoubleSide})
+  );
+  ring.name="pulse";
+  ring.rotation.x=-Math.PI/2;
+  ring.position.y=0.08;
+  g.add(ring);
+ 
+  // Direction cone (points in -Z = forward)
+  const cone=new THREE.Mesh(
+    new THREE.ConeGeometry(0.14,0.44,8),
+    new THREE.MeshStandardMaterial({color:0xffffff,emissive:0xffffff,emissiveIntensity:0.5})
+  );
+  cone.rotation.x=Math.PI/2;
+  cone.position.set(0,0.07,-0.55);
+  g.add(cone);
+ 
+  g.position.set(user.x,0.07,user.z);
+  scene.add(g);
+  avatar=g;
 }
-
-// ── Build router signal rows in status panel ─────────────────
-function buildRouterRows() {
-  routerRows.innerHTML = "";
-  for (const r of ROUTERS) {
-    const hex = "#" + r.color.toString(16).padStart(6,"0");
-    routerRows.insertAdjacentHTML("beforeend", `
-      <div class="router-row" id="rrow-${r.id}">
-        <span class="router-dot" style="background:${hex};box-shadow:0 0 6px ${hex}88"></span>
-        <span class="router-name">${r.label}</span>
-        <span class="router-rssi" id="rssi-${r.id}" style="color:${hex}">—</span>
-        <div class="router-bar">
-          <div class="router-fill" id="rbar-${r.id}" style="background:${hex};width:0%"></div>
-        </div>
-      </div>
-    `);
-  }
+ 
+function syncAvatar(){
+  if(!avatar)return;
+  avatar.position.set(user.x,0.07,user.z);
+  avatar.rotation.y=user.heading;
 }
-
-// ═══════════════════════════════════════════════════════════════
-//  MINIMAP  (canvas injected into #minimap)
-// ═══════════════════════════════════════════════════════════════
-const MM_W = 210, MM_H = 210, MM_PAD = 12;
-const mmCanvas = document.createElement("canvas");
-mmCanvas.width = MM_W; mmCanvas.height = MM_H;
-mmCanvas.style.cssText = `width:${MM_W}px;height:${MM_H}px;cursor:crosshair;display:block;`;
-minimapWrap.insertBefore(mmCanvas, minimapWrap.firstChild);
-const mmCtx = mmCanvas.getContext("2d");
-
-const FL_W = FLAT_BOUNDS.maxX - FLAT_BOUNDS.minX;
-const FL_H = FLAT_BOUNDS.maxZ - FLAT_BOUNDS.minZ;
-
-function flatToMM(fx, fz) {
-  return {
-    px: MM_PAD + ((fx - FLAT_BOUNDS.minX) / FL_W) * (MM_W - MM_PAD * 2),
-    py: MM_PAD + ((fz - FLAT_BOUNDS.minZ) / FL_H) * (MM_H - MM_PAD * 2),
-  };
+ 
+// ================================================================
+//  3D FLOATING PATH  — Black Myth Wukong style
+//    Catmull-Rom tube + floating orbs + destination beacon
+// ================================================================
+const pathObjs=[];
+ 
+function clearPath(){
+  pathObjs.forEach(o=>scene.remove(o));
+  pathObjs.length=0;
 }
-function mmToFlat(px, py) {
-  return {
-    fx: FLAT_BOUNDS.minX + ((px - MM_PAD) / (MM_W - MM_PAD * 2)) * FL_W,
-    fz: FLAT_BOUNDS.minZ + ((py - MM_PAD) / (MM_H - MM_PAD * 2)) * FL_H,
-  };
+ 
+function drawPath(pts){
+  clearPath();
+  if(!pts||pts.length<2)return;
+ 
+  // Smooth curve
+  const curve=new THREE.CatmullRomCurve3(
+    pts.map(p=>new THREE.Vector3(p.x,0.85,p.z)),false,"centripetal"
+  );
+  const segs=Math.max(pts.length*4,40);
+ 
+  // Outer glow tube
+  const t1=new THREE.Mesh(
+    new THREE.TubeGeometry(curve,segs,0.09,8,false),
+    new THREE.MeshBasicMaterial({color:0x00ffaa,transparent:true,opacity:0.09,side:THREE.BackSide})
+  );
+  scene.add(t1); pathObjs.push(t1);
+ 
+  // Core tube
+  const t2=new THREE.Mesh(
+    new THREE.TubeGeometry(curve,segs,0.038,8,false),
+    new THREE.MeshBasicMaterial({color:0x44ffcc,transparent:true,opacity:0.55})
+  );
+  scene.add(t2); pathObjs.push(t2);
+ 
+  // Floating orbs every ~1.2m
+  let acc=0;
+  for(let i=1;i<pts.length;i++){
+    acc+=Math.hypot(pts[i].x-pts[i-1].x,pts[i].z-pts[i-1].z);
+    if(acc>=1.2||i===1){ acc=0; spawnOrb(pts[i].x,pts[i].z); }
+  }
+ 
+  // Destination beacon
+  buildBeacon(pts[pts.length-1].x,pts[pts.length-1].z);
 }
-
-const ROOM_COLORS = {
-  "Room": "#0d2340", "Hall": "#0d2a14", "Kitchen": "#2a1e0a",
-  "Main Entrance": "#1a0f2a", "Corridor": "#141820",
-};
-
-function drawMinimap() {
-  mmCtx.clearRect(0, 0, MM_W, MM_H);
-
-  // Room polygons
-  for (const room of ROOMS) {
-    mmCtx.beginPath();
-    room.polygon.forEach(([x,z], i) => {
-      const { px, py } = flatToMM(x, z);
-      i === 0 ? mmCtx.moveTo(px,py) : mmCtx.lineTo(px,py);
-    });
-    mmCtx.closePath();
-    mmCtx.fillStyle   = ROOM_COLORS[room.name] || "#111";
-    mmCtx.fill();
-    mmCtx.strokeStyle = "rgba(255,255,255,0.08)";
-    mmCtx.lineWidth   = 1;
-    mmCtx.stroke();
-  }
-
-  // Room name labels
-  mmCtx.font          = "bold 6.5px 'DM Mono', monospace";
-  mmCtx.textAlign     = "center";
-  mmCtx.textBaseline  = "middle";
-  for (const room of ROOMS) {
-    const c = polyCenter2D(room.polygon);
-    const { px, py } = flatToMM(c.x, c.z);
-    mmCtx.fillStyle = "rgba(200,165,80,0.6)";
-    mmCtx.fillText(room.name.toUpperCase(), px, py);
-  }
-
-  // Router markers + range ring
-  for (const r of ROUTERS) {
-    const { px, py } = flatToMM(r.pos.x, r.pos.z);
-    const hex = "#" + r.color.toString(16).padStart(6,"0");
-
-    // Range ring
-    const rangePx = (6 / FL_W) * (MM_W - MM_PAD * 2);
-    mmCtx.beginPath();
-    mmCtx.arc(px, py, rangePx, 0, Math.PI * 2);
-    mmCtx.strokeStyle = hex + "22";
-    mmCtx.lineWidth   = 1;
-    mmCtx.stroke();
-
-    // Dot
-    mmCtx.beginPath();
-    mmCtx.arc(px, py, 4.5, 0, Math.PI * 2);
-    mmCtx.fillStyle   = hex;
-    mmCtx.shadowColor = hex;
-    mmCtx.shadowBlur  = 8;
-    mmCtx.fill();
-    mmCtx.shadowBlur  = 0;
-    mmCtx.strokeStyle = "rgba(255,255,255,0.4)";
-    mmCtx.lineWidth   = 1;
-    mmCtx.stroke();
-  }
-
-  // Door markers
-  for (const d of DOOR_LABELS) {
-    const { px, py } = flatToMM(d.x, d.z);
-    mmCtx.fillStyle   = "rgba(80,140,255,0.85)";
-    mmCtx.shadowColor = "rgba(80,140,255,0.5)";
-    mmCtx.shadowBlur  = 5;
-    mmCtx.fillRect(px-2.5, py-2.5, 5, 5);
-    mmCtx.shadowBlur  = 0;
-  }
-
-  // Route overlay (drawn before player dot so dot sits on top)
-  drawRouteOnMinimap();
-
-  // Accuracy circle
-  if (positioning.accuracy > 0) {
-    const { px, py } = flatToMM(playerPos.x, playerPos.y);
-    const accPx = (positioning.accuracy / FL_W) * (MM_W - MM_PAD * 2);
-    mmCtx.beginPath();
-    mmCtx.arc(px, py, accPx, 0, Math.PI * 2);
-    mmCtx.strokeStyle = "rgba(0,200,255,0.20)";
-    mmCtx.lineWidth   = 2;
-    mmCtx.stroke();
-  }
-
-  // Player dot
-  const { px: ppx, py: ppy } = flatToMM(playerPos.x, playerPos.y);
-
-  // Outer pulse
-  mmCtx.beginPath();
-  mmCtx.arc(ppx, ppy, 7 + 2 * (0.5 + 0.5 * Math.sin(pulsePhase)), 0, Math.PI * 2);
-  mmCtx.strokeStyle = "rgba(0,200,255,0.20)";
-  mmCtx.lineWidth   = 1.5;
-  mmCtx.stroke();
-
+ 
+function spawnOrb(x,z){
+  const g=new THREE.Group();
+  g.userData={baseY:0.85,phase:Math.random()*Math.PI*2};
+ 
   // Core
-  mmCtx.beginPath();
-  mmCtx.arc(ppx, ppy, 5, 0, Math.PI * 2);
-  mmCtx.fillStyle   = "#00c8ff";
-  mmCtx.shadowColor = "#00c8ff";
-  mmCtx.shadowBlur  = 10;
-  mmCtx.fill();
-  mmCtx.shadowBlur  = 0;
-  mmCtx.strokeStyle = "#fff";
-  mmCtx.lineWidth   = 1.5;
-  mmCtx.stroke();
-
-  // Heading arrow
-  const hx = ppx + Math.sin(yaw) * 11;
-  const hy  = ppy - Math.cos(yaw) * 11;
-  mmCtx.beginPath();
-  mmCtx.moveTo(ppx, ppy);
-  mmCtx.lineTo(hx, hy);
-  mmCtx.strokeStyle = "rgba(255,255,255,0.7)";
-  mmCtx.lineWidth   = 2;
-  mmCtx.lineCap     = "round";
-  mmCtx.stroke();
-  mmCtx.lineCap     = "butt";
+  g.add(new THREE.Mesh(
+    new THREE.SphereGeometry(0.11,16,16),
+    new THREE.MeshStandardMaterial({color:0x00ffaa,emissive:0x00ffaa,emissiveIntensity:2.8,transparent:true,opacity:0.95})
+  ));
+  // Glow shell
+  g.add(new THREE.Mesh(
+    new THREE.SphereGeometry(0.24,16,16),
+    new THREE.MeshBasicMaterial({color:0x00ffaa,transparent:true,opacity:0.11,side:THREE.BackSide})
+  ));
+ 
+  g.position.set(x,0.85,z);
+  scene.add(g); pathObjs.push(g);
 }
-
-mmCanvas.addEventListener("click", (e) => {
-  const rect = mmCanvas.getBoundingClientRect();
-  const px = (e.clientX - rect.left) * (MM_W / rect.width);
-  const py = (e.clientY - rect.top)  * (MM_H / rect.height);
-  const { fx, fz } = mmToFlat(px, py);
-  if (fx >= FLAT_BOUNDS.minX && fx <= FLAT_BOUNDS.maxX &&
-      fz >= FLAT_BOUNDS.minZ && fz <= FLAT_BOUNDS.maxZ) {
-    playerPos.set(fx, fz);
-    syncPlayerToScene();
-  }
-});
-
-// ═══════════════════════════════════════════════════════════════
-//  NAVIGATION — DESTINATION PANEL + PATH DRAWING
-// ═══════════════════════════════════════════════════════════════
-
-// ── Destinations (rooms + doors merged into one list) ────────
-const NAV_DESTINATIONS = [
-  ...ROOMS.map(r => {
-    const c = polyCenter2D(r.polygon);
-    return { name: r.name, x: c.x, z: c.z, icon: "🚪", type: "room" };
-  }),
-  ...DOOR_LABELS.map(d => ({ name: d.name, x: d.x, z: d.z, icon: "🚪", type: "door" })),
-];
-
-// Assign nicer icons per name
-const DEST_ICONS = {
-  "Room": "🛏", "Hall": "🚶", "Kitchen": "🍳",
-  "Main Entrance": "🏠", "Corridor": "🔀",
-  "Main Gate": "🚪", "Aahan Gate": "🚪",
-  "Balcony Gate": "🌿", "Sandeep Room": "🛋", "Washroom": "🚿",
-};
-NAV_DESTINATIONS.forEach(d => { d.icon = DEST_ICONS[d.name] || "📍"; });
-
-// ── Simple waypoint graph for path routing ───────────────────
-// Each destination snaps to its nearest corridor waypoint first,
-// then a direct line is drawn. For a small flat this is enough.
-// Corridor centre acts as the hub waypoint.
-const CORRIDOR_HUB = { x: -1.5, z: -5.0 };
-
-function buildPath(fromX, fromZ, toX, toZ) {
-  // If both points are in roughly the same half, go direct.
-  // Otherwise route through the corridor hub to avoid clipping walls.
-  const direct = Math.sqrt((toX-fromX)**2 + (toZ-fromZ)**2);
-  // Simple heuristic: if destination is far (>8 m) use hub
-  if (direct > 8) {
-    return [
-      { x: fromX, z: fromZ },
-      { x: CORRIDOR_HUB.x, z: CORRIDOR_HUB.z },
-      { x: toX, z: toZ },
-    ];
-  }
-  return [{ x: fromX, z: fromZ }, { x: toX, z: toZ }];
-}
-
-// ── Active route state ───────────────────────────────────────
-let activeRoute = null;   // { dest, waypoints: [{x,z}], line3D }
-let route3DLine = null;   // THREE.Line in the scene
-
-function setDestination(dest) {
-  // Remove old 3D line
-  if (route3DLine) { scene.remove(route3DLine); route3DLine = null; }
-
-  if (!dest) {
-    activeRoute = null;
-    document.getElementById("navPanel").classList.remove("has-route");
-    refreshNavButtons();
-    return;
-  }
-
-  const waypoints = buildPath(playerPos.x, playerPos.y, dest.x, dest.z);
-  activeRoute = { dest, waypoints };
-  document.getElementById("navPanel").classList.add("has-route");
-  refreshNavButtons();
-
-  // Build 3D line (drawn slightly above floor)
-  if (scaleFactor > 0) build3DRouteLine(waypoints);
-}
-
-function build3DRouteLine(waypoints) {
-  if (route3DLine) { scene.remove(route3DLine); route3DLine = null; }
-  const pts = waypoints.map(w =>
-    new THREE.Vector3(w.x * scaleFactor, 0.06 * scaleFactor, w.z * scaleFactor)
+ 
+function buildBeacon(x,z){
+  const C=0x00ffaa;
+ 
+  // Light column
+  const col=new THREE.Mesh(
+    new THREE.CylinderGeometry(0.02,0.4,5.5,16,1,true),
+    new THREE.MeshBasicMaterial({color:C,transparent:true,opacity:0.2,side:THREE.DoubleSide})
   );
-  const geo = new THREE.BufferGeometry().setFromPoints(pts);
-  const mat = new THREE.LineDashedMaterial({
-    color:     0x00c8ff,
-    linewidth: 2,
-    dashSize:  0.3 * scaleFactor,
-    gapSize:   0.15 * scaleFactor,
-    transparent: true,
-    opacity:   0.85,
+  col.position.set(x,2.75,z);
+  scene.add(col); pathObjs.push(col);
+ 
+  // Inner bright column
+  const col2=new THREE.Mesh(
+    new THREE.CylinderGeometry(0.01,0.12,5.5,8,1,true),
+    new THREE.MeshBasicMaterial({color:0xffffff,transparent:true,opacity:0.15,side:THREE.DoubleSide})
+  );
+  col2.position.set(x,2.75,z);
+  scene.add(col2); pathObjs.push(col2);
+ 
+  // Base ring
+  const base=new THREE.Mesh(
+    new THREE.TorusGeometry(0.5,0.06,8,48),
+    new THREE.MeshStandardMaterial({color:C,emissive:C,emissiveIntensity:2})
+  );
+  base.rotation.x=Math.PI/2;
+  base.position.set(x,0.07,z);
+  scene.add(base); pathObjs.push(base);
+ 
+  // Spinning ring
+  const spin=new THREE.Mesh(
+    new THREE.TorusGeometry(0.8,0.035,8,48),
+    new THREE.MeshBasicMaterial({color:0xffffff,transparent:true,opacity:0.4})
+  );
+  spin.position.set(x,2.4,z);
+  spin.name="spinRing";
+  scene.add(spin); pathObjs.push(spin);
+ 
+  // Top orb
+  const top=new THREE.Mesh(
+    new THREE.SphereGeometry(0.24,20,20),
+    new THREE.MeshStandardMaterial({color:C,emissive:C,emissiveIntensity:4})
+  );
+  top.position.set(x,5.5,z);
+  scene.add(top); pathObjs.push(top);
+ 
+  // Top orb glow
+  const topG=new THREE.Mesh(
+    new THREE.SphereGeometry(0.46,20,20),
+    new THREE.MeshBasicMaterial({color:C,transparent:true,opacity:0.09,side:THREE.BackSide})
+  );
+  topG.position.set(x,5.5,z);
+  scene.add(topG); pathObjs.push(topG);
+}
+ 
+// ================================================================
+//  CAMERA MODES
+// ================================================================
+let camMode="overview";
+ 
+const CAM={
+  overview(){
+    camMode="overview";
+    controls.enabled=true;
+    controls.maxPolarAngle=Math.PI*0.2;       // nearly top-down, slight tilt allowed
+    camera.position.set(CX, 35, CZ+4);        // high enough to see whole flat
+    camera.lookAt(CX,0,CZ);
+    controls.target.set(CX,0,CZ);
+    controls.update();
+    setActive("btnOverview");
+  },
+  orbit(){
+    camMode="orbit";
+    controls.enabled=true;
+    controls.maxPolarAngle=Math.PI*0.82;
+    camera.position.set(CX+8,14,CZ+20);
+    camera.lookAt(CX,0,CZ);
+    controls.target.set(CX,0,CZ);
+    controls.update();
+    setActive("btnOrbit");
+  },
+  pov(){
+    camMode="pov";
+    controls.enabled=false;
+    _syncPOV();
+    setActive("btnPOV");
+  },
+};
+ 
+function _syncPOV(){
+  const h=user.heading;
+  camera.position.set(user.x+Math.sin(h)*0.15,1.72,user.z+Math.cos(h)*0.15);
+  camera.lookAt(user.x+Math.sin(h)*7,1.55,user.z+Math.cos(h)*7);
+}
+ 
+function setActive(id){
+  ["btnOverview","btnOrbit","btnPOV"].forEach(b=>
+    document.getElementById(b)?.classList.toggle("active",b===id));
+}
+ 
+// ================================================================
+//  KEYBOARD MOVEMENT
+// ================================================================
+const KEYS={};
+window.addEventListener("keydown",e=>{ KEYS[e.code]=true; });
+window.addEventListener("keyup",  e=>{ KEYS[e.code]=false; });
+window.addEventListener("keydown",e=>{
+  if(e.key==="1")CAM.overview();
+  if(e.key==="2")CAM.orbit();
+  if(e.key==="3")CAM.pov();
+  if(e.key.toLowerCase()==="n")document.getElementById("btnNav")?.click();
+});
+ 
+function handleMovement(){
+  let dx=0,dz=0;
+  if(KEYS["KeyW"]||KEYS["ArrowUp"])    dz-=1;
+  if(KEYS["KeyS"]||KEYS["ArrowDown"])  dz+=1;
+  if(KEYS["KeyA"]||KEYS["ArrowLeft"])  dx-=1;
+  if(KEYS["KeyD"]||KEYS["ArrowRight"]) dx+=1;
+  if(!dx&&!dz)return;
+  const l=Math.sqrt(dx*dx+dz*dz);
+  user.x+=(dx/l)*0.06; user.z+=(dz/l)*0.06;
+  user.heading=Math.atan2(-dx/l,-dz/l);
+  user.clamp(); syncAvatar();
+  if(camMode==="pov")_syncPOV();
+  updateHUD();
+}
+ 
+// ================================================================
+//  CLICK TO NAVIGATE
+// ================================================================
+let navActive=false, destOrb=null;
+const RC=new THREE.Raycaster(), MV=new THREE.Vector2();
+ 
+renderer.domElement.addEventListener("click",e=>{
+  if(!navActive)return;
+  MV.x=(e.clientX/innerWidth)*2-1;
+  MV.y=-(e.clientY/innerHeight)*2+1;
+  RC.setFromCamera(MV,camera);
+  const fp=overlay?.children?.find(c=>c.name==="floorPlane");
+  if(!fp)return;
+  const hit=RC.intersectObject(fp);
+  if(!hit.length)return;
+ 
+  if(destOrb){scene.remove(destOrb);destOrb=null;}
+  const {x,z}=hit[0].point;
+ 
+  // Yellow destination orb
+  const g=new THREE.Group(); g.userData={baseY:0.85,phase:0};
+  [
+    [0.17,0xffff00,3,  false],
+    [0.34,0xffff00,0,  true ],
+  ].forEach(([r,c,ei,back])=>{
+    g.add(new THREE.Mesh(new THREE.SphereGeometry(r,16,16),
+      back
+        ? new THREE.MeshBasicMaterial({color:c,transparent:true,opacity:0.12,side:THREE.BackSide})
+        : new THREE.MeshStandardMaterial({color:c,emissive:c,emissiveIntensity:ei})
+    ));
   });
-  route3DLine = new THREE.Line(geo, mat);
-  route3DLine.computeLineDistances();
-  scene.add(route3DLine);
-}
-
-// Re-build route from current position every frame so line stays fresh
-let routeRebuildTimer = 0;
-function tickRouteRebuild(dt) {
-  if (!activeRoute) return;
-  routeRebuildTimer += dt;
-  if (routeRebuildTimer < 1.0) return;   // rebuild every 1 s
-  routeRebuildTimer = 0;
-  activeRoute.waypoints = buildPath(playerPos.x, playerPos.y, activeRoute.dest.x, activeRoute.dest.z);
-  if (scaleFactor > 0) build3DRouteLine(activeRoute.waypoints);
-}
-
-// ── Draw route overlay on minimap ────────────────────────────
-function drawRouteOnMinimap() {
-  if (!activeRoute) return;
-  const wps = activeRoute.waypoints;
-
-  // Dashed path line
-  mmCtx.save();
-  mmCtx.setLineDash([5, 3]);
-  mmCtx.beginPath();
-  wps.forEach((wp, i) => {
-    const { px, py } = flatToMM(wp.x, wp.z);
-    i === 0 ? mmCtx.moveTo(px, py) : mmCtx.lineTo(px, py);
-  });
-  mmCtx.strokeStyle = "#00c8ff";
-  mmCtx.lineWidth   = 2;
-  mmCtx.shadowColor = "#00c8ff";
-  mmCtx.shadowBlur  = 6;
-  mmCtx.stroke();
-  mmCtx.restore();
-
-  // Destination pin
-  const dest = activeRoute.dest;
-  const { px: dpx, py: dpy } = flatToMM(dest.x, dest.z);
-  mmCtx.beginPath();
-  mmCtx.arc(dpx, dpy, 6, 0, Math.PI * 2);
-  mmCtx.fillStyle   = "#ff4d6a";
-  mmCtx.shadowColor = "#ff4d6a";
-  mmCtx.shadowBlur  = 10;
-  mmCtx.fill();
-  mmCtx.shadowBlur  = 0;
-  mmCtx.strokeStyle = "#fff";
-  mmCtx.lineWidth   = 1.5;
-  mmCtx.stroke();
-
-  // Distance label above pin
-  const distM = Math.sqrt((dest.x - playerPos.x)**2 + (dest.z - playerPos.y)**2).toFixed(1);
-  mmCtx.font      = "bold 7px 'DM Mono', monospace";
-  mmCtx.fillStyle = "#fff";
-  mmCtx.textAlign = "center";
-  mmCtx.fillText(`${distM} m`, dpx, dpy - 10);
-}
-
-// ── Build panel buttons ──────────────────────────────────────
-function buildNavPanel() {
-  const roomsEl = document.getElementById("navRooms");
-  const doorsEl = document.getElementById("navDoors");
-  roomsEl.innerHTML = "";
-  doorsEl.innerHTML = "";
-
-  for (const dest of NAV_DESTINATIONS) {
-    const btn = document.createElement("button");
-    btn.className   = "nav-dest-btn";
-    btn.dataset.name = dest.name;
-    const distM = Math.sqrt((dest.x - playerPos.x)**2 + (dest.z - playerPos.y)**2).toFixed(0);
-    btn.innerHTML = `
-      <span class="dest-icon">${dest.icon}</span>
-      <span>${dest.name}</span>
-      <span class="dest-dist">${distM} m</span>
-    `;
-    btn.addEventListener("click", () => {
-      const already = activeRoute?.dest?.name === dest.name;
-      setDestination(already ? null : dest);
-    });
-    (dest.type === "room" ? roomsEl : doorsEl).appendChild(btn);
-  }
-}
-
-function refreshNavButtons() {
-  document.querySelectorAll(".nav-dest-btn").forEach(btn => {
-    const isActive = btn.dataset.name === activeRoute?.dest?.name;
-    btn.classList.toggle("active", isActive);
-    // Update distance
-    const dest = NAV_DESTINATIONS.find(d => d.name === btn.dataset.name);
-    if (dest) {
-      const distM = Math.sqrt((dest.x - playerPos.x)**2 + (dest.z - playerPos.y)**2).toFixed(0);
-      const distEl = btn.querySelector(".dest-dist");
-      if (distEl) distEl.textContent = distM + " m";
-    }
-  });
-}
-
-// Panel open/close toggle
-document.getElementById("navToggle").addEventListener("click", () => {
-  document.getElementById("navPanel").classList.toggle("open");
+  g.position.set(x,0.85,z);
+  scene.add(g); destOrb=g;
+ 
+  const path=aStar(user.x,user.z,x,z);
+  if(path){ drawPath(path); toast(`✅ Path — ${path.length} waypoints`); }
+  else     toast("❌ No path — try clicking inside a room");
+ 
+  navActive=false;
+  document.getElementById("btnNav")?.classList.remove("active");
+  renderer.domElement.style.cursor="default";
 });
-
-// Clear route button
-document.getElementById("navClearBtn").addEventListener("click", () => {
-  setDestination(null);
-});
-
-// ═══════════════════════════════════════════════════════════════
-//  STATUS PANEL UPDATE
-// ═══════════════════════════════════════════════════════════════
-function updateStatusPanel() {
-  const p = positioning;
-
-  document.getElementById("posSource").textContent  = p.source;
-  document.getElementById("coordX").innerHTML       = `${playerPos.x.toFixed(2)}<span class="coord-unit">m</span>`;
-  document.getElementById("coordZ").innerHTML       = `${playerPos.y.toFixed(2)}<span class="coord-unit">m</span>`;
-  document.getElementById("accVal").textContent     = `±${p.accuracy.toFixed(1)} m`;
-  document.getElementById("stepCount").textContent  = p.steps;
-  document.getElementById("headingVal").textContent = `${(p.heading * 180 / Math.PI).toFixed(0)}°`;
-  mmLabel.textContent = p.source;
-
-  // Accuracy bar — map 0–8m accuracy range → bar width
-  const accPct = Math.min(100, (p.accuracy / 8) * 100);
-  document.getElementById("accFill").style.width = accPct + "%";
-
-  // Per-router RSSI + signal bar
-  for (const r of ROUTERS) {
-    const rssiEl = document.getElementById(`rssi-${r.id}`);
-    const barEl  = document.getElementById(`rbar-${r.id}`);
-    if (!rssiEl || !barEl) continue;
-    const val = p.rssi[r.id];
-    if (val !== undefined) {
-      rssiEl.textContent = val.toFixed(0) + " dBm";
-      // Map -100 dBm (bad) → 0% to -30 dBm (great) → 100%
-      const pct = Math.max(0, Math.min(100, ((val + 100) / 70) * 100));
-      barEl.style.width = pct + "%";
-    } else {
-      rssiEl.textContent = "—";
-      barEl.style.width  = "0%";
-    }
-  }
+ 
+// ================================================================
+//  FLOOR SWITCH
+// ================================================================
+let curFloor=1;
+window.switchFloor=function(idx){
+  curFloor=parseInt(idx); user.floor=curFloor;
+  buildOverlay(curFloor); buildAvatar(); clearPath();
+  if(destOrb){scene.remove(destOrb);destOrb=null;}
+  updateHUD();
+  document.querySelectorAll(".floor-btn").forEach(b=>
+    b.classList.toggle("active",parseInt(b.dataset.floor)===curFloor));
+  toast(`🏠 ${FLOORS[curFloor].label}`);
+};
+ 
+// ================================================================
+//  GLB MODEL LOADER  (optional — works without model.glb)
+// ================================================================
+function hideLoader(){
+  const l=document.getElementById("loader");
+  if(l){l.style.opacity="0";setTimeout(()=>l.style.display="none",600);}
 }
-
-// ═══════════════════════════════════════════════════════════════
-//  INPUT — KEYBOARD
-// ═══════════════════════════════════════════════════════════════
-const keys = {};
-document.addEventListener("keydown", (e) => {
-  keys[e.code] = true;
-  if (e.code === "KeyV") toggleCameraMode();
-});
-document.addEventListener("keyup", (e) => { keys[e.code] = false; });
-
-// ═══════════════════════════════════════════════════════════════
-//  INPUT — POINTER LOCK
-// ═══════════════════════════════════════════════════════════════
-let pointerLocked = false;
-
-renderer.domElement.addEventListener("click", () => {
-  if (cameraMode === "fps") {
-    dismissHint();
-    if (!pointerLocked) renderer.domElement.requestPointerLock();
-  }
-});
-
-// Also dismiss on any key press or touch so mobile users aren't stuck
-document.addEventListener("keydown", (e) => {
-  if (e.code !== "KeyV") dismissHint();
-}, { capture: true });
-
-renderer.domElement.addEventListener("touchstart", () => {
-  dismissHint();
-}, { passive: true });
-
-document.addEventListener("pointerlockchange", () => {
-  pointerLocked = document.pointerLockElement === renderer.domElement;
-  // Re-show hint only if user never dismissed it and lock was released in FPS mode
-  if (!pointerLocked && cameraMode === "fps" && !hintDismissed) {
-    hintOverlay.style.display = "flex";
-  }
-});
-
-document.addEventListener("mousemove", (e) => {
-  if (!pointerLocked || cameraMode !== "fps") return;
-  yaw   -= e.movementX * MOUSE_SENS;
-  pitch -= e.movementY * MOUSE_SENS;
-  pitch  = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, pitch));
-});
-
-// ═══════════════════════════════════════════════════════════════
-//  INPUT — TOUCH
-// ═══════════════════════════════════════════════════════════════
-let touchLast = null;
-
-renderer.domElement.addEventListener("touchstart", (e) => {
-  e.preventDefault();
-  touchLast = { x: e.touches[0].clientX, y: e.touches[0].clientY };
-}, { passive: false });
-
-renderer.domElement.addEventListener("touchmove", (e) => {
-  e.preventDefault();
-  if (!touchLast) return;
-  if (e.touches.length === 1) {
-    yaw   -= (e.touches[0].clientX - touchLast.x) * TOUCH_SENS;
-    pitch -= (e.touches[0].clientY - touchLast.y) * TOUCH_SENS;
-    pitch  = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, pitch));
-    touchLast = { x: e.touches[0].clientX, y: e.touches[0].clientY };
-  } else if (e.touches.length === 2) {
-    const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
-    const fwd  = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
-    yawObj.position.addScaledVector(fwd, -(midY - touchLast.y) * 0.015 * scaleFactor);
-    clampPosition();
-    touchLast = { x: touchLast.x, y: midY };
-  }
-}, { passive: false });
-
-renderer.domElement.addEventListener("touchend",    () => { touchLast = null; });
-renderer.domElement.addEventListener("touchcancel", () => { touchLast = null; });
-
-// ═══════════════════════════════════════════════════════════════
-//  CAMERA MODE TOGGLE
-// ═══════════════════════════════════════════════════════════════
-let hintDismissed = false;
-
-function dismissHint() {
-  hintDismissed = true;
-  hintOverlay.style.display = "none";
-}
-
-function toggleCameraMode() {
-  if (cameraMode === "fps") {
-    cameraMode   = "overview";
-    activeCamera = ovCam;
-    if (pointerLocked) document.exitPointerLock();
-    hintOverlay.style.display = "none";
-    viewBtnLabel.textContent  = "FPS View";
-  } else {
-    cameraMode   = "fps";
-    activeCamera = fpsCam;
-    viewBtnLabel.textContent  = "Overview";
-    // Only re-show hint if user has never interacted
-    if (!hintDismissed) hintOverlay.style.display = "flex";
-  }
-}
-
-viewBtn.addEventListener("click", toggleCameraMode);
-
-// ═══════════════════════════════════════════════════════════════
-//  ROOM LABELS  (3D projected HTML)
-// ═══════════════════════════════════════════════════════════════
-const labelContainer = document.getElementById("labelContainer");
-const labelObjects   = [];
-
-function polyCenter2D(poly) {
-  let sx = 0, sz = 0;
-  for (const [x,z] of poly) { sx+=x; sz+=z; }
-  return { x: sx/poly.length, z: sz/poly.length };
-}
-
-function makeLabelEl(text, isRoom) {
-  const el = document.createElement("div");
-  el.textContent = text;
-  el.style.cssText = `
-    position:absolute; transform:translate(-50%,-50%);
-    background:${isRoom ? "rgba(8,12,16,0.80)" : "rgba(8,30,80,0.80)"};
-    color:${isRoom ? "#d4a84b" : "#7ab8ff"};
-    font-family:'Syne',sans-serif;
-    font-size:${isRoom ? "12px" : "10px"};
-    font-weight:${isRoom ? "700" : "600"};
-    letter-spacing:0.10em; padding:${isRoom ? "4px 10px" : "3px 8px"};
-    border-radius:5px;
-    border:1px solid ${isRoom ? "rgba(212,168,75,0.20)" : "rgba(120,180,255,0.20)"};
-    white-space:nowrap; backdrop-filter:blur(4px);
-    text-transform:uppercase; opacity:0; transition:opacity 0.12s;
-    pointer-events:none;
-  `;
-  labelContainer.appendChild(el);
-  return el;
-}
-
-function initLabels(sf) {
-  for (const room of ROOMS) {
-    const c = polyCenter2D(room.polygon);
-    labelObjects.push({ el: makeLabelEl(room.name, true),  worldPos: new THREE.Vector3(c.x * sf, EYE_HEIGHT * sf * 0.4, c.z * sf) });
-  }
-  for (const d of DOOR_LABELS) {
-    labelObjects.push({ el: makeLabelEl(d.name, false), worldPos: new THREE.Vector3(d.x * sf, EYE_HEIGHT * sf * 0.9, d.z * sf) });
-  }
-}
-
-const _proj    = new THREE.Vector3();
-const _camWPos = new THREE.Vector3();
-
-function updateLabels() {
-  const show = cameraMode === "fps";
-  const W = renderer.domElement.clientWidth;
-  const H = renderer.domElement.clientHeight;
-  activeCamera.getWorldPosition(_camWPos);
-  for (const { el, worldPos } of labelObjects) {
-    if (!show) { el.style.opacity = "0"; continue; }
-    _proj.copy(worldPos).project(activeCamera);
-    if (_proj.z > 1) { el.style.opacity = "0"; continue; }
-    const dist = worldPos.distanceTo(_camWPos);
-    const fade = Math.max(0, Math.min(1, 1 - (dist - 1) / 35));
-    el.style.left    = ((_proj.x * 0.5 + 0.5) * W) + "px";
-    el.style.top     = ((-_proj.y * 0.5 + 0.5) * H) + "px";
-    el.style.opacity = fade.toString();
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════
-//  LOAD MODEL
-// ═══════════════════════════════════════════════════════════════
-const loader = new GLTFLoader();
-
-loader.load(
+ 
+new GLTFLoader().load(
   "./model.glb",
-  (gltf) => {
-    const model = gltf.scene;
-    model.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
-
-    const box = new THREE.Box3().setFromObject(model);
-    model.position.sub(box.getCenter(new THREE.Vector3()));
-    scene.add(model);
-
-    const sz = box.getSize(new THREE.Vector3());
-    scaleFactor = (FLAT_BOUNDS.maxX - FLAT_BOUNDS.minX) / sz.x;
-    model.scale.setScalar(scaleFactor);
-
-    const box2 = new THREE.Box3().setFromObject(model);
-    model.position.sub(box2.getCenter(new THREE.Vector3()));
-
-    const inset = 0.25 * scaleFactor;
-    eyeY = EYE_HEIGHT * scaleFactor;
-    bounds = {
-      minX: FLAT_BOUNDS.minX * scaleFactor + inset,
-      maxX: FLAT_BOUNDS.maxX * scaleFactor - inset,
-      minZ: FLAT_BOUNDS.minZ * scaleFactor + inset,
-      maxZ: FLAT_BOUNDS.maxZ * scaleFactor - inset,
-    };
-
-    for (const r of ROUTERS) {
-      const mesh = buildRouterMesh(r);
-      routerMarkers.push(mesh);
-      mesh.scale.setScalar(scaleFactor);
-      mesh.position.set(r.pos.x * scaleFactor, r.pos.y * scaleFactor, r.pos.z * scaleFactor);
-    }
-
-    const flatW  = (FLAT_BOUNDS.maxX - FLAT_BOUNDS.minX) * scaleFactor;
-    const flatH  = (FLAT_BOUNDS.maxZ - FLAT_BOUNDS.minZ) * scaleFactor;
-    const aspect = window.innerWidth / window.innerHeight;
-    const halfH  = Math.max(flatW / aspect, flatH) / 2 * 1.15;
-    ovCam.left   = -halfH * aspect; ovCam.right  =  halfH * aspect;
-    ovCam.top    =  halfH;          ovCam.bottom = -halfH;
-    ovCam.position.set(0, flatW * 2, 0);
-    ovCam.lookAt(0, 0, 0);
-    ovCam.updateProjectionMatrix();
-
-    yawObj.position.set(SPAWN.x * scaleFactor, eyeY, SPAWN.z * scaleFactor);
-    playerPos.set(SPAWN.x, SPAWN.z);
-    yaw = SPAWN.yaw;
-
-    buildRouterRows();
-    buildNavPanel();
-    initLabels(scaleFactor);
-    initDeadReckoning();
-    initWifiPositioning();
-
-    loadFill.style.width = "100%";
-    setTimeout(() => { loadFill.style.opacity = "0"; }, 600);
-    showToast("🏠 Click anywhere to explore  ·  V for overview", 4000);
-  },
-  (xhr) => {
-    const pct = xhr.total ? (xhr.loaded / xhr.total * 100).toFixed(0) : "?";
-    loadFill.style.width = (xhr.total ? (xhr.loaded / xhr.total * 80) : 30) + "%";
-    showToast(`Loading model… ${pct}%`, 9999);
-  },
-  (err) => {
-    showToast("❌ Failed to load model");
-    console.error(err);
-  }
-);
-
-// ═══════════════════════════════════════════════════════════════
-//  POSITIONING ENGINE
-// ═══════════════════════════════════════════════════════════════
-const positioning = {
-  source:   "WASD",
-  accuracy: 0,
-  rssi:     {},
-  steps:    0,
-  heading:  0,
-};
-
-const kalman = {
-  x: SPAWN.x, z: SPAWN.z,
-  covX: 5.0,  covZ: 5.0,
-  Q: 0.5, R_wifi: 2.0, R_dr: 0.3,
-};
-
-function kalmanPredict(dx, dz, dt) {
-  kalman.x += dx; kalman.z += dz;
-  kalman.covX += kalman.Q * dt; kalman.covZ += kalman.Q * dt;
-}
-function kalmanUpdate(measX, measZ, R) {
-  const Kx = kalman.covX / (kalman.covX + R);
-  kalman.x += Kx * (measX - kalman.x); kalman.covX = (1 - Kx) * kalman.covX;
-  const Kz = kalman.covZ / (kalman.covZ + R);
-  kalman.z += Kz * (measZ - kalman.z); kalman.covZ = (1 - Kz) * kalman.covZ;
-  playerPos.set(kalman.x, kalman.z);
-  syncPlayerToScene();
-}
-
-function rssiToDistance(rssi, router) {
-  return Math.pow(10, (router.txPower - rssi) / (10 * router.pathLoss));
-}
-
-function trilaterate(measurements) {
-  let px = kalman.x, pz = kalman.z;
-  for (let iter = 0; iter < 50; iter++) {
-    let gradX = 0, gradZ = 0, totalW = 0;
-    for (const { router, dist } of measurements) {
-      const dx = px - router.pos.x, dz = pz - router.pos.z;
-      const d3d = Math.sqrt(dx*dx + dz*dz + router.pos.y*router.pos.y);
-      if (d3d < 0.01) continue;
-      const err = d3d - dist, w = 1 / (dist * dist);
-      gradX += w * err * (dx / d3d); gradZ += w * err * (dz / d3d); totalW += w;
-    }
-    if (totalW < 0.001) break;
-    px -= 0.3 * gradX / totalW; pz -= 0.3 * gradZ / totalW;
-  }
-  return { x: px, z: pz };
-}
-
-let wifiAvailable = false;
-const DEV_SIMULATE_WIFI = true;
-
-function initWifiPositioning() { pollWifiServer(); }
-function pollWifiServer() {
-  setInterval(async () => {
-    try {
-      const res  = await fetch("http://localhost:8765/wifi", { signal: AbortSignal.timeout(2000) });
-      const data = await res.json();
-      processWifiScan(data.networks || []);
-      wifiAvailable = true;
-    } catch {
-      if (DEV_SIMULATE_WIFI) simulateWifi();
-    }
-  }, 2500);
-}
-
-function simulateWifi() {
-  const measurements = [];
-  for (const router of ROUTERS) {
-    const dx   = playerPos.x - router.pos.x;
-    const dz   = playerPos.y - router.pos.z;
-    const dy   = -router.pos.y;
-    const dist = Math.sqrt(dx*dx + dz*dz + dy*dy);
-    const rssi = router.txPower - 10 * router.pathLoss * Math.log10(Math.max(dist, 0.5))
-                 + (Math.random() - 0.5) * 6;
-    positioning.rssi[router.id] = rssi;
-    measurements.push({ router, dist: rssiToDistance(rssi, router) });
-  }
-  processTrilateration(measurements);
-  positioning.source   = "WiFi-SIM";
-  positioning.accuracy = 1.5;
-}
-
-function processWifiScan(networks) {
-  const measurements = [];
-  for (const router of ROUTERS) {
-    const found = networks.find(n => n.bssid?.toUpperCase() === router.bssid.toUpperCase());
-    if (!found) continue;
-    positioning.rssi[router.id] = found.rssi;
-    measurements.push({ router, dist: rssiToDistance(found.rssi, router) });
-  }
-  if (measurements.length >= 2) {
-    processTrilateration(measurements);
-    positioning.source   = `WiFi(${measurements.length})`;
-    positioning.accuracy = measurements.length >= 3 ? 1.5 : 3.0;
-  }
-}
-
-function processTrilateration(measurements) {
-  if (measurements.length < 2) return;
-  const { x, z } = trilaterate(measurements);
-  kalmanUpdate(
-    Math.max(FLAT_BOUNDS.minX, Math.min(FLAT_BOUNDS.maxX, x)),
-    Math.max(FLAT_BOUNDS.minZ, Math.min(FLAT_BOUNDS.maxZ, z)),
-    kalman.R_wifi
-  );
-}
-
-let drActive = false, lastAccelTime = 0;
-const accelBuf = [], STEP_LEN = 0.65;
-
-function initDeadReckoning() {
-  if (typeof DeviceMotionEvent === "undefined") return;
-  if (typeof DeviceMotionEvent.requestPermission === "function") {
-    DeviceMotionEvent.requestPermission().then(s => { if (s === "granted") listenMotion(); }).catch(() => {});
-  } else { listenMotion(); }
-  if (typeof DeviceOrientationEvent !== "undefined") {
-    window.addEventListener("deviceorientation", (e) => {
-      if (e.alpha !== null) positioning.heading = e.alpha * Math.PI / 180;
+  gltf=>{
+    const m=gltf.scene;
+    const box=new THREE.Box3().setFromObject(m);
+    const sz=box.getSize(new THREE.Vector3());
+    const sc=Math.min(FW/sz.x,FD/sz.z);
+    m.scale.setScalar(sc);
+    const box2=new THREE.Box3().setFromObject(m);
+    const c2=box2.getCenter(new THREE.Vector3());
+    m.position.set(CX-c2.x,-box2.min.y,CZ-c2.z);
+    m.traverse(c=>{
+      if(!c.isMesh)return;
+      c.castShadow=c.receiveShadow=true;
+      (Array.isArray(c.material)?c.material:[c.material]).forEach(mat=>{
+        mat.transparent=true; mat.opacity=0.78;
+      });
     });
-  }
+    scene.add(m);
+    hideLoader(); toast("✅ 3D model loaded");
+  },
+  xhr=>{
+    const p=xhr.total?(xhr.loaded/xhr.total*100).toFixed(0):"?";
+    const el=document.getElementById("loadPct");
+    if(el)el.textContent=p+"%";
+  },
+  ()=>{ hideLoader(); toast("Layout overlay mode (no model.glb)"); }
+);
+ 
+// ================================================================
+//  HUD & TOAST
+// ================================================================
+function updateHUD(){
+  const cfg=FLOORS[curFloor];
+  const el=document.getElementById("hudContent"); if(!el)return;
+  el.innerHTML=`
+    <div class="hud-row"><span class="hud-label">Floor</span><span class="hud-val">${cfg.label}</span></div>
+    <div class="hud-row"><span class="hud-label">X</span><span class="hud-val">${user.x.toFixed(2)} m</span></div>
+    <div class="hud-row"><span class="hud-label">Z</span><span class="hud-val">${user.z.toFixed(2)} m</span></div>
+    <div class="hud-row"><span class="hud-label">Heading</span><span class="hud-val">${(user.heading*180/Math.PI).toFixed(0)}°</span></div>
+    <div class="hud-row"><span class="hud-label">Anchor</span><span class="hud-val anchor">${cfg.router.label}</span></div>
+  `;
 }
-
-function listenMotion() {
-  drActive = true;
-  window.addEventListener("devicemotion", (e) => {
-    const acc = e.accelerationIncludingGravity;
-    if (!acc) return;
-    const mag = Math.sqrt(acc.x**2 + acc.y**2 + acc.z**2);
-    const now = Date.now(), dt = (now - lastAccelTime) / 1000;
-    lastAccelTime = now;
-    accelBuf.push(mag); if (accelBuf.length > 5) accelBuf.shift();
-    const avg = accelBuf.reduce((a,b) => a+b,0) / accelBuf.length;
-    if (mag > avg + 1.2 && dt > 0.25) {
-      positioning.steps++;
-      const h = positioning.heading || yaw;
-      kalmanPredict(Math.sin(h) * STEP_LEN, -Math.cos(h) * STEP_LEN, dt);
-      kalman.x = Math.max(FLAT_BOUNDS.minX, Math.min(FLAT_BOUNDS.maxX, kalman.x));
-      kalman.z = Math.max(FLAT_BOUNDS.minZ, Math.min(FLAT_BOUNDS.maxZ, kalman.z));
-      playerPos.set(kalman.x, kalman.z);
-      syncPlayerToScene();
-      positioning.source   = "DeadReck";
-      positioning.accuracy = Math.min(3 + positioning.steps * 0.1, 8);
+ 
+function toast(msg){
+  const t=document.getElementById("toast"); if(!t)return;
+  t.textContent=msg; t.style.opacity="1"; t.style.transform="translateY(0)";
+  clearTimeout(t._t);
+  t._t=setTimeout(()=>{t.style.opacity="0";t.style.transform="translateY(10px)";},3500);
+}
+ 
+// ================================================================
+//  TEXT SPRITE
+// ================================================================
+function makeSprite(text,size,color){
+  const cv=document.createElement("canvas");
+  cv.width=512; cv.height=128;
+  const ctx=cv.getContext("2d");
+  ctx.font=`bold ${size}px Arial`;
+  ctx.fillStyle=color;
+  ctx.textAlign="center"; ctx.textBaseline="middle";
+  ctx.fillText(text,256,64);
+  return new THREE.Sprite(new THREE.SpriteMaterial({
+    map:new THREE.CanvasTexture(cv),transparent:true,depthTest:false
+  }));
+}
+ 
+// ================================================================
+//  ANIMATION LOOP
+// ================================================================
+let t0=0;
+function animate(now=0){
+  requestAnimationFrame(animate);
+  const t=now*0.001;
+  handleMovement();
+  controls.update();
+ 
+  // Avatar pulse ring
+  const ring=avatar?.getObjectByName("pulse");
+  if(ring){
+    ring.material.opacity=0.3+0.35*Math.sin(t*3.5);
+    const s=1+0.14*Math.sin(t*2.5); ring.scale.set(s,s,1);
+  }
+ 
+  // Path orbs bob + beacon spin
+  pathObjs.forEach(o=>{
+    if(o.userData?.baseY!==undefined)
+      o.position.y=o.userData.baseY+0.18*Math.sin(t*2.2+o.userData.phase);
+    if(o.name==="spinRing") o.rotation.y+=0.018;
+  });
+ 
+  // Destination orb bob
+  if(destOrb) destOrb.position.y=0.85+0.15*Math.sin(t*3.2);
+ 
+  // Router rings ripple
+  overlay?.children?.forEach(c=>{
+    if(c.name==="routerRing"){
+      const s=1+0.18*Math.sin(t*2+c.position.x);
+      c.scale.set(s,s,1);
     }
   });
+ 
+  renderer.render(scene,camera);
 }
-
-function syncPlayerToScene() {
-  if (!bounds) return;
-  yawObj.position.set(playerPos.x * scaleFactor, eyeY, playerPos.y * scaleFactor);
-}
-
-// ═══════════════════════════════════════════════════════════════
-//  HELPERS
-// ═══════════════════════════════════════════════════════════════
-function clampPosition() {
-  if (!bounds) return;
-  yawObj.position.x = Math.max(bounds.minX, Math.min(bounds.maxX, yawObj.position.x));
-  yawObj.position.z = Math.max(bounds.minZ, Math.min(bounds.maxZ, yawObj.position.z));
-  yawObj.position.y = eyeY;
-  playerPos.set(yawObj.position.x / scaleFactor, yawObj.position.z / scaleFactor);
-  kalman.x = playerPos.x; kalman.z = playerPos.y;
-}
-
-window.addEventListener("resize", () => {
-  fpsCam.aspect = window.innerWidth / window.innerHeight;
-  fpsCam.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
+ 
+// ================================================================
+//  INIT  — runs after DOM is ready
+// ================================================================
+window.addEventListener("DOMContentLoaded",()=>{
+  buildOverlay(curFloor);
+  buildAvatar();
+  CAM.overview();
+  updateHUD();
+ 
+  // Button wiring
+  document.getElementById("btnOverview")?.addEventListener("click",CAM.overview);
+  document.getElementById("btnOrbit")   ?.addEventListener("click",CAM.orbit);
+  document.getElementById("btnPOV")     ?.addEventListener("click",CAM.pov);
+ 
+  document.getElementById("btnNav")?.addEventListener("click",()=>{
+    navActive=!navActive;
+    document.getElementById("btnNav").classList.toggle("active",navActive);
+    renderer.domElement.style.cursor=navActive?"crosshair":"default";
+    toast(navActive?"🗺 Click on the floor to set destination":"Navigation cancelled");
+  });
+ 
+  document.getElementById("btnClear")?.addEventListener("click",()=>{
+    clearPath();
+    if(destOrb){scene.remove(destOrb);destOrb=null;}
+    toast("Path cleared");
+  });
+ 
+  document.getElementById("btnWifi")?.addEventListener("click",()=>{
+    user.wifiCorrect(); syncAvatar(); updateHUD();
+    toast("📡 WiFi fix applied");
+  });
+ 
+  document.querySelectorAll(".floor-btn").forEach(b=>
+    b.addEventListener("click",()=>window.switchFloor(b.dataset.floor)));
+ 
+  // Periodic WiFi correction every 4s
+  setInterval(()=>{ user.wifiCorrect(); syncAvatar(); updateHUD(); },4000);
+ 
+  animate();
 });
-
-// ═══════════════════════════════════════════════════════════════
-//  ANIMATION LOOP
-// ═══════════════════════════════════════════════════════════════
-const clock    = new THREE.Clock();
-const vel      = new THREE.Vector3();
-const _forward = new THREE.Vector3();
-const _right   = new THREE.Vector3();
-const _wish    = new THREE.Vector3();
-
-function animate() {
-  requestAnimationFrame(animate);
-  const dt = Math.min(clock.getDelta(), 0.05);
-
-  yawObj.rotation.y   = yaw;
-  pitchObj.rotation.x = pitch;
-
-  if (bounds && cameraMode === "fps") {
-    const mf = (keys["KeyW"] || keys["ArrowUp"])    ? 1 : 0;
-    const mb = (keys["KeyS"] || keys["ArrowDown"])  ? 1 : 0;
-    const ml = (keys["KeyA"] || keys["ArrowLeft"])  ? 1 : 0;
-    const mr = (keys["KeyD"] || keys["ArrowRight"]) ? 1 : 0;
-
-    _forward.set(-Math.sin(yaw), 0, -Math.cos(yaw));
-    _right.set(   Math.cos(yaw), 0, -Math.sin(yaw));
-    _wish.set(0,0,0).addScaledVector(_forward, mf-mb).addScaledVector(_right, mr-ml);
-
-    const moving = _wish.lengthSq() > 0;
-    if (moving) _wish.normalize();
-
-    const maxSpd = MAX_SPD * scaleFactor;
-    if (moving) {
-      vel.addScaledVector(_wish, ACCEL * scaleFactor * dt);
-      if (vel.length() > maxSpd) vel.setLength(maxSpd);
-    } else {
-      const loss = FRICTION * scaleFactor * dt;
-      const cur  = vel.length();
-      if (cur > loss) vel.setLength(cur - loss); else vel.set(0,0,0);
-    }
-
-    yawObj.position.addScaledVector(vel, dt);
-    clampPosition();
-
-    if (moving) kalmanPredict(vel.x * dt / scaleFactor, vel.z * dt / scaleFactor, dt);
-  }
-
-  // Player dot
-  playerDot.position.set(yawObj.position.x, 0.012 * scaleFactor, yawObj.position.z);
-  playerDot.rotation.y = yaw;
-  playerDot.scale.setScalar(scaleFactor);
-
-  // Pulse animation
-  pulsePhase += dt * 1.8;
-  const pulse  = 0.5 + 0.5 * Math.sin(pulsePhase);
-  const pulse2 = 0.5 + 0.5 * Math.sin(pulsePhase * 0.6);
-  pulseMesh.scale.setScalar(1.0 + pulse * 0.55);
-  pulseMat.opacity  = 0.6 * (1 - pulse * 0.7);
-  haloMat.opacity   = 0.06 + 0.07 * pulse2;
-  coreMat.color.setHSL(0.58, 1.0, 0.32 + pulse * 0.12);
-
-  if (cameraMode === "overview") {
-    ovCam.position.x = yawObj.position.x;
-    ovCam.position.z = yawObj.position.z;
-    ovCam.lookAt(yawObj.position.x, 0, yawObj.position.z);
-  }
-
-  tickRouteRebuild(dt);
-  refreshNavButtons();
-  updateLabels();
-  drawMinimap();
-  updateStatusPanel();
-  renderer.render(scene, activeCamera);
-}
-
-animate();
-
-// ═══════════════════════════════════════════════════════════════
-//  COMPANION SERVER INSTRUCTIONS
-// ═══════════════════════════════════════════════════════════════
-console.log(`
-%c📡 WiFi Trilateration — Companion Server Setup
-%cRun on Android (Termux):  pkg install nodejs termux-api
-Then: node wifi-server.js  (see full instructions in source)
-
-Current mode: %cDEV_SIMULATE_WIFI = true
-`,
-  "color:#00c8ff; font-weight:bold; font-size:13px",
-  "color:#7a8fa8; font-size:10px",
-  "color:#00e5a0; font-size:10px"
-);
+ 
+window.addEventListener("resize",()=>{
+  camera.aspect=innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+});
